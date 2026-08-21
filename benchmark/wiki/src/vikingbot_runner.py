@@ -369,8 +369,6 @@ class VikingBotRunner:
                 "Do not use any external source. "
                 "Always use OpenViking tools first. Search first, then read the results to answer. "
                 "Use the default OpenViking search scope; do not force a specific target_uri unless needed. "
-                "Search results may come from original resources or wiki nodes. "
-                "If wiki node documents are relevant, read them and use them as evidence together with original resources when useful."
                 f"\n\nQuestion: {question}"
             )
 

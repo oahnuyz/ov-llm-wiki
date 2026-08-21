@@ -136,24 +136,16 @@ class OVFileTool(Tool, ABC):
         tool_context: ToolContext,
         uri: str | None,
     ) -> list[str]:
+        if self._is_default_root_uri(uri):
+            return ["viking://resources/"]
+
         if getattr(client, "actor_peer_id", None):
-            if self._is_default_root_uri(uri):
-                return [uri or "viking://"]
             if self._is_default_memory_uri(client, uri):
                 return [uri or self._current_memory_uri(client)]
             return [uri or ""]
 
         if not self._is_default_memory_uri(client, uri):
-            if not self._is_default_root_uri(uri):
-                return [uri or ""]
-
-            target_uris = [
-                "viking://resources/",
-                self._current_memory_uri(client),
-                self._current_skill_uri(client),
-                *self._peer_memory_uris(client, tool_context),
-            ]
-            return self._dedupe_strings(target_uris)
+            return [uri or ""]
 
         builder = getattr(client, "build_current_memory_target_uris", None)
         if callable(builder):
@@ -410,6 +402,8 @@ class VikingSearchTool(OVFileTool):
         client = None
         try:
             client = await self._get_client(tool_context)
+            if self._is_default_root_uri(target_uri):
+                target_uri = "viking://resources/"
             memory_owner_user_ids = getattr(tool_context, "memory_owner_user_ids", None)
             legacy_memory_user_ids = getattr(tool_context, "memory_user_ids", None)
 
@@ -428,7 +422,6 @@ class VikingSearchTool(OVFileTool):
                 user_ids = memory_owner_user_ids or legacy_memory_user_ids
                 search_targets: list[tuple[str, str | None]] = [
                     ("viking://resources/", None),
-                    ("viking://wiki/nodes", None),
                 ]
                 for user_id in self._dedupe_strings(list(user_ids or [])):
                     memory_uri = client._memory_target_uri(user_id)
@@ -448,7 +441,6 @@ class VikingSearchTool(OVFileTool):
                         target_uris = self._dedupe_strings(
                             [
                                 "viking://resources/",
-                                "viking://wiki/nodes",
                                 self._current_memory_uri(client),
                                 self._current_skill_uri(client),
                                 *self._peer_memory_uris(client, tool_context, peer_ids=peer_ids),
@@ -597,15 +589,7 @@ class VikingGrepTool(OVFileTool):
         if not self._is_default_root_uri(uri):
             return self._fs_retrieval_uris(client, tool_context, uri)
 
-        return self._dedupe_strings(
-            [
-                "viking://resources/",
-                "viking://wiki/nodes",
-                self._current_memory_uri(client),
-                self._current_skill_uri(client),
-                *self._peer_memory_uris(client, tool_context),
-            ]
-        )
+        return ["viking://resources/"]
 
     async def execute(
         self,
@@ -908,7 +892,7 @@ class VikingMultiReadTool(OVFileTool):
                 "uris": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": 'List of Viking file URIs to read from (e.g., ["viking://resources/path/123.md", "viking://wiki/nodes/topic/documents/0001.md"])',
+                    "description": 'List of Viking file URIs to read from (e.g., ["viking://resources/path/123.md"])',
                 },
             },
             "required": ["uris"],

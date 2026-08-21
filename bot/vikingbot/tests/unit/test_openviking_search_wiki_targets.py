@@ -142,33 +142,26 @@ class FakeVikingGrepTool(VikingGrepTool):
 
 
 @pytest.mark.asyncio
-async def test_openviking_search_includes_wiki_nodes_for_actor_peer_default_target():
+async def test_openviking_search_uses_only_resources_for_actor_peer_default_target():
     client = FakeVikingClient(actor_peer_id="cli-user")
     tool = FakeVikingSearchTool(client)
 
     await tool.execute(ToolContext(actor_peer_id="cli-user"), query="steam")
 
     target_uris = [call["target_uri"] for call in client.search_calls]
-    assert "viking://resources/" in target_uris
-    assert "viking://wiki/nodes" in target_uris
-    assert "viking://user/memories/" in target_uris
-    assert "viking://user/skills/" in target_uris
+    assert target_uris == ["viking://resources/"]
 
 
 @pytest.mark.asyncio
-async def test_openviking_grep_includes_wiki_nodes_for_default_target():
+async def test_openviking_grep_uses_only_resources_for_default_target():
     client = FakeGrepClient()
     tool = FakeVikingGrepTool(client)
 
     result = await tool.execute(ToolContext(), pattern="steam")
 
     target_uris = [call["uri"] for call in client.grep_calls]
-    assert "viking://resources/" in target_uris
-    assert "viking://wiki/nodes" in target_uris
-    assert "viking://user/memories/" in target_uris
-    assert "viking://user/skills/" in target_uris
-    assert "viking://wiki/nodes/steam/documents/0001.md" in result
-    assert "viking://wiki/nodes/steam_workshop/documents/0001.md" in result
+    assert target_uris == ["viking://resources/"]
+    assert result == "No matches found for pattern: 'steam'"
 
 
 @pytest.mark.asyncio
@@ -189,7 +182,7 @@ async def test_openviking_grep_keeps_explicit_wiki_node_target_for_client_api():
 
 
 @pytest.mark.asyncio
-async def test_openviking_search_includes_wiki_nodes_for_sender_fanout_default_target():
+async def test_openviking_search_uses_only_resources_for_sender_fanout_default_target():
     client = FakeVikingClient(sender_fanout=True)
     tool = FakeVikingSearchTool(client)
 
@@ -199,10 +192,7 @@ async def test_openviking_search_includes_wiki_nodes_for_sender_fanout_default_t
     )
 
     target_calls = [(call["target_uri"], call.get("user_id")) for call in client.search_calls]
-    assert ("viking://resources/", None) in target_calls
-    assert ("viking://wiki/nodes", None) in target_calls
-    assert ("viking://user/owner-a/memories/", "owner-a") in target_calls
-    assert ("viking://user/owner-a/skills/", "owner-a") in target_calls
+    assert target_calls == [("viking://resources/", None)]
 
 
 @pytest.mark.asyncio
