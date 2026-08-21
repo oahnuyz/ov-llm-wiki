@@ -680,6 +680,7 @@ class VikingClient:
                 query,
                 target_uri=target_uri,
                 limit=limit,
+                telemetry=True,
             )
         finally:
             if should_close:
@@ -696,6 +697,7 @@ class VikingClient:
             "total": self._matched_context_total(result, memories, resources, skills),
             "query": query,
             "target_uri": target_uri,
+            "telemetry": result.get("telemetry", {}) if isinstance(result, dict) else {},
         }
 
     async def search_user_memory(self, query: str, user_id: str) -> list[Any]:

@@ -163,6 +163,61 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         if observer_cls is not None:
             self._observer = observer_cls(self)
 
+    async def search(
+        self,
+        query: str = "",
+        target_uri: Any = "",
+        session: Any = None,
+        session_id: str | None = None,
+        limit: int = 10,
+        node_limit: int | None = None,
+        score_threshold: float | None = None,
+        filter: Dict[str, Any] | None = None,
+        context_type: Any = None,
+        tags: list[str] | None = None,
+        telemetry: Any = False,
+        image: Any = None,
+    ) -> Dict[str, Any]:
+        """Run search and preserve requested operation telemetry in the result map."""
+        if telemetry is False:
+            return await super().search(
+                query=query,
+                target_uri=target_uri,
+                session=session,
+                session_id=session_id,
+                limit=limit,
+                node_limit=node_limit,
+                score_threshold=score_threshold,
+                filter=filter,
+                context_type=context_type,
+                tags=tags,
+                telemetry=False,
+                image=image,
+            )
+
+        actual_limit = node_limit if node_limit is not None else limit
+        sid = session_id or (session.session_id if session else None)
+        image_normalizer = getattr(import_openviking_sdk().client, "_normalize_image_input", None)
+        payload = {
+            "query": query,
+            "image_url": image_normalizer(image) if callable(image_normalizer) else image,
+            "target_uri": self._normalize_target_uri(target_uri),
+            "session_id": sid,
+            "limit": actual_limit,
+            "score_threshold": score_threshold,
+            "filter": filter,
+            "context_type": self._normalize_context_type(context_type),
+            "tags": tags,
+            "telemetry": telemetry,
+        }
+        payload = self._compact_request_body(payload)
+        response = await self._request("POST", "/api/v1/search/search", json=payload)
+        response_data = self._handle_response_data(response)
+        result = response_data.get("result", {})
+        if isinstance(result, dict) and response_data.get("telemetry"):
+            result["telemetry"] = response_data["telemetry"]
+        return result
+
     def _raise_exception(self, error: Dict[str, Any]) -> None:
         _raise_legacy_exception(error)
 

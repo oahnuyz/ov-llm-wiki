@@ -1130,6 +1130,7 @@ class AgentLoop:
                         "execute_success": _is_tool_result_success(result),
                         "input_token": tool_call.tokens,
                         "output_token": cal_str_tokens(result, text_type="mixed"),
+                        "metadata": dict(getattr(result, "metadata", {}) or {}),
                     }
                     tools_used.append(tool_used_dict)
                     turn_tools.append(tool_used_dict)
@@ -1659,6 +1660,13 @@ class AgentLoop:
                 time_cost=response_completed["time_cost_ms"] / 1000,
                 iteration=response_completed["iteration_count"],
                 tools_used_names=response_completed["tools_used_names"],
+                tools_used=[
+                    {
+                        "tool_name": tool.get("tool_name", ""),
+                        "metadata": dict(tool.get("metadata", {}) or {}),
+                    }
+                    for tool in (tools_used or [])
+                ],
             )
         finally:
             long_running_notified = True

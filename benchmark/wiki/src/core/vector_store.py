@@ -12,6 +12,17 @@ import openviking as ov
 
 
 class VikingStoreWrapper:
+    SOURCE_TOKENIZER = "cl100k_base"
+    SOURCE_TEXT_EXTENSIONS = {
+        ".json",
+        ".markdown",
+        ".md",
+        ".text",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+
     def __init__(self, store_path: str):
         self.store_path = store_path
         if not os.path.exists(store_path):
@@ -20,7 +31,7 @@ class VikingStoreWrapper:
         self.client = ov.SyncOpenViking(path=store_path)
         
         try:
-            self.enc = tiktoken.get_encoding("cl100k_base")
+            self.enc = tiktoken.get_encoding(self.SOURCE_TOKENIZER)
         except Exception as e:
             print(f"[Warning] tiktoken init failed: {e}")
             self.enc = None
@@ -29,6 +40,36 @@ class VikingStoreWrapper:
         if not text or not self.enc:
             return 0
         return len(self.enc.encode(str(text)))
+
+    def _count_ingested_source_tokens(self, resource_uris: List[str]) -> int:
+        """Count searchable source text after parsing, excluding derived summaries."""
+        if not self.enc:
+            raise RuntimeError(
+                f"Cannot count source document tokens: tokenizer {self.SOURCE_TOKENIZER!r} "
+                "is unavailable"
+            )
+
+        total_tokens = 0
+        counted_uris: set[str] = set()
+        for root_uri in dict.fromkeys(resource_uris):
+            entries = self.client.ls(
+                root_uri,
+                recursive=True,
+                output="original",
+                show_all_hidden=False,
+                node_limit=None,
+                level_limit=None,
+            )
+            for entry in entries:
+                if entry.get("isDir", False):
+                    continue
+                uri = str(entry.get("uri", ""))
+                suffix = Path(str(entry.get("name", uri))).suffix.lower()
+                if not uri or uri in counted_uris or suffix not in self.SOURCE_TEXT_EXTENSIONS:
+                    continue
+                total_tokens += self.count_tokens(self.client.read(uri))
+                counted_uris.add(uri)
+        return total_tokens
 
     def ingest(
         self,
@@ -48,6 +89,9 @@ class VikingStoreWrapper:
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "embedding_tokens": 0,
+                "source_documents": 0,
+                "source_document_tokens": 0,
+                "source_tokenizer": self.SOURCE_TOKENIZER,
                 "resource_uris": [],
             }
         
@@ -111,11 +155,17 @@ class VikingStoreWrapper:
                 total_output_tokens += llm_tokens.get("output", 0)
                 total_embedding_tokens += embedding_tokens.get("total", 0)
 
+        insertion_time = time.time() - start_time
+        source_document_tokens = self._count_ingested_source_tokens(resource_uris)
+
         return {
-            "time": time.time() - start_time,
+            "time": insertion_time,
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
             "embedding_tokens": total_embedding_tokens,
+            "source_documents": len({os.path.abspath(sample.doc_path) for sample in samples}),
+            "source_document_tokens": source_document_tokens,
+            "source_tokenizer": self.SOURCE_TOKENIZER,
             "resource_uris": resource_uris,
         }
 

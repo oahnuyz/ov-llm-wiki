@@ -39,7 +39,15 @@ class BenchmarkPipeline:
         self.resource_manifest_file = os.path.join(self.output_dir, "imported_resources.json")
         
         self.metrics_summary = {
-            "insertion": {"time": 0, "input_tokens": 0, "output_tokens": 0, "embedding_tokens": 0},
+            "insertion": {
+                "time": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "embedding_tokens": 0,
+                "source_documents": 0,
+                "source_document_tokens": 0,
+                "source_tokenizer": VikingStoreWrapper.SOURCE_TOKENIZER,
+            },
             "deletion": {"time": 0, "input_tokens": 0, "output_tokens": 0, "embedding_tokens": 0}
         }
 
@@ -76,12 +84,28 @@ class BenchmarkPipeline:
         self.metrics_summary["insertion"] = ingest_stats
         self.logger.info(f"Insertion finished. Time: {ingest_stats['time']:.2f}s")
 
+        insertion_token_cost = (
+            int(self.metrics_summary["insertion"].get("input_tokens", 0) or 0)
+            + int(self.metrics_summary["insertion"].get("output_tokens", 0) or 0)
+            + int(self.metrics_summary["insertion"].get("embedding_tokens", 0) or 0)
+        )
+
         self._update_report({
             "Insertion Efficiency (Total Dataset)": {
                 "Total Insertion Time (s)": self.metrics_summary["insertion"]["time"],
+                "Total Source Documents": self.metrics_summary["insertion"].get(
+                    "source_documents", 0
+                ),
+                "Total Source Document Tokens": self.metrics_summary["insertion"].get(
+                    "source_document_tokens", 0
+                ),
+                "Source Tokenizer": self.metrics_summary["insertion"].get(
+                    "source_tokenizer", VikingStoreWrapper.SOURCE_TOKENIZER
+                ),
                 "Total Input Tokens": self.metrics_summary["insertion"]["input_tokens"],
                 "Total Output Tokens": self.metrics_summary["insertion"]["output_tokens"],
-                "Total Embedding Tokens": self.metrics_summary["insertion"].get("embedding_tokens", 0)
+                "Total Embedding Tokens": self.metrics_summary["insertion"].get("embedding_tokens", 0),
+                "Total Insertion Token Cost": insertion_token_cost,
             }
         })
 
@@ -162,11 +186,59 @@ class BenchmarkPipeline:
         }
         total = len(sorted_results)
         if total > 0:
+            total_retrieval_time = sum(
+                float(r['retrieval']['latency_sec']) for r in sorted_results
+            )
+            total_agent_input_tokens = sum(
+                int(
+                    r['token_usage'].get(
+                        'agent_prompt_tokens',
+                        r['token_usage'].get('total_input_tokens', 0),
+                    ) or 0
+                )
+                for r in sorted_results
+            )
+            total_agent_output_tokens = sum(
+                int(
+                    r['token_usage'].get(
+                        'agent_completion_tokens',
+                        r['token_usage'].get('llm_output_tokens', 0),
+                    ) or 0
+                )
+                for r in sorted_results
+            )
+            total_search_llm_input_tokens = sum(
+                int(r['token_usage'].get('search_llm_input_tokens', 0) or 0)
+                for r in sorted_results
+            )
+            total_search_llm_output_tokens = sum(
+                int(r['token_usage'].get('search_llm_output_tokens', 0) or 0)
+                for r in sorted_results
+            )
+            total_retrieval_embedding_tokens = sum(
+                int(r['token_usage'].get('retrieval_embedding_tokens', 0) or 0)
+                for r in sorted_results
+            )
+            total_retrieval_token_cost = (
+                total_agent_input_tokens
+                + total_agent_output_tokens
+                + total_search_llm_input_tokens
+                + total_search_llm_output_tokens
+                + total_retrieval_embedding_tokens
+            )
             self._update_report({
                     "Query Efficiency (Average Per Query)": {
-                        "Average Retrieval Time (s)": sum(r['retrieval']['latency_sec'] for r in sorted_results) / total,
-                        "Average Input Tokens": sum(r['token_usage']['total_input_tokens'] for r in sorted_results) / total,
-                        "Average Output Tokens": sum(r['token_usage']['llm_output_tokens'] for r in sorted_results) / total,
+                        "Average Retrieval Time (s)": total_retrieval_time / total,
+                        "Average Retrieval Token Cost": total_retrieval_token_cost / total,
+                    },
+                    "Query Efficiency (Total Dataset)": {
+                        "Total Retrieval Time (s)": total_retrieval_time,
+                        "Total Agent LLM Input Tokens": total_agent_input_tokens,
+                        "Total Agent LLM Output Tokens": total_agent_output_tokens,
+                        "Total Search LLM Input Tokens": total_search_llm_input_tokens,
+                        "Total Search LLM Output Tokens": total_search_llm_output_tokens,
+                        "Total Retrieval Embedding Tokens": total_retrieval_embedding_tokens,
+                        "Total Retrieval Token Cost": total_retrieval_token_cost,
                     }
                 }
             )
@@ -229,6 +301,7 @@ class BenchmarkPipeline:
                     "Average Recall": sum(r['metrics']['Recall'] for r in eval_records) / total,
                     "Average Accuracy (Hit 0-4)": sum(r['metrics']['Accuracy'] for r in eval_records) / total,
                     "Average Accuracy (normalization)": (sum(r['metrics']['Accuracy'] for r in eval_records) / total)/4,
+                    "Normalized Accuracy (0-1)": (sum(r['metrics']['Accuracy'] for r in eval_records) / total)/4,
                 }
             })
 
@@ -346,6 +419,46 @@ class BenchmarkPipeline:
             prompt_tokens = int(token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0)
             completion_tokens = int(token_usage.get("completion_tokens", token_usage.get("output_tokens", 0)) or 0)
             total_tokens = int(token_usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+            search_api_usage = {
+                "llm_input_tokens": 0,
+                "llm_output_tokens": 0,
+                "embedding_tokens": 0,
+            }
+            for tool_call in vikingbot_result.get("tools_used", []) or []:
+                if not isinstance(tool_call, dict) or tool_call.get("tool_name") != "openviking_search":
+                    continue
+                metadata = tool_call.get("metadata", {}) or {}
+                if not isinstance(metadata, dict) or metadata.get("telemetry_collected") is not True:
+                    raise RuntimeError(
+                        "OpenViking search telemetry is missing; "
+                        "refusing to record an incomplete token cost"
+                    )
+                usage = metadata.get("api_token_usage", {}) if isinstance(metadata, dict) else {}
+                if not isinstance(usage, dict):
+                    raise RuntimeError(
+                        "OpenViking search telemetry is missing; refusing to record an incomplete token cost"
+                    )
+                required_usage_keys = {
+                    "llm_input_tokens",
+                    "llm_output_tokens",
+                    "embedding_tokens",
+                }
+                if not required_usage_keys.issubset(usage):
+                    raise RuntimeError(
+                        "OpenViking search telemetry has incomplete token fields; "
+                        "refusing to record an incomplete token cost"
+                    )
+                for key in search_api_usage:
+                    search_api_usage[key] += int(usage.get(key, 0) or 0)
+
+            total_input_tokens = prompt_tokens + search_api_usage["llm_input_tokens"]
+            total_output_tokens = completion_tokens + search_api_usage["llm_output_tokens"]
+            retrieval_embedding_tokens = search_api_usage["embedding_tokens"]
+            retrieval_total_tokens = (
+                total_input_tokens
+                + total_output_tokens
+                + retrieval_embedding_tokens
+            )
             self.monitor.worker_end(tokens=prompt_tokens + completion_tokens)
 
             self.logger.info(
@@ -374,12 +487,18 @@ class BenchmarkPipeline:
                 },
                 "metrics": {"Recall": 0.0},
                 "token_usage": {
-                    "total_input_tokens": 0,
-                    "llm_output_tokens": 0,
-                    "retrieval_embedding_tokens": 0,
+                    "total_input_tokens": total_input_tokens,
+                    "llm_output_tokens": total_output_tokens,
+                    "retrieval_embedding_tokens": retrieval_embedding_tokens,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
+                    "agent_prompt_tokens": prompt_tokens,
+                    "agent_completion_tokens": completion_tokens,
+                    "agent_total_tokens": total_tokens,
+                    "search_llm_input_tokens": search_api_usage["llm_input_tokens"],
+                    "search_llm_output_tokens": search_api_usage["llm_output_tokens"],
+                    "retrieval_total_tokens": retrieval_total_tokens,
+                    "total_tokens": retrieval_total_tokens,
                 },
             }
         except Exception:

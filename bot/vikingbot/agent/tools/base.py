@@ -8,6 +8,15 @@ from vikingbot.config.schema import SessionKey
 from vikingbot.sandbox.manager import SandboxManager
 
 
+class ToolResult(str):
+    """String tool result with execution metadata hidden from the model context."""
+
+    def __new__(cls, value: str, metadata: dict[str, Any] | None = None):
+        instance = super().__new__(cls, value)
+        instance.metadata = dict(metadata or {})
+        return instance
+
+
 @dataclass
 class ToolContext:
     """Context passed to tools during execution, containing runtime information.

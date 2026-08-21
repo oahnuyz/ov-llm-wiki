@@ -40,6 +40,14 @@ class FakeVikingClient:
             ],
             "memories": [],
             "skills": [],
+            "telemetry": {
+                "summary": {
+                    "tokens": {
+                        "llm": {"input": 2, "output": 3},
+                        "embedding": {"total": 5},
+                    }
+                }
+            },
         }
 
     async def close(self) -> None:
@@ -146,10 +154,16 @@ async def test_openviking_search_uses_only_resources_for_actor_peer_default_targ
     client = FakeVikingClient(actor_peer_id="cli-user")
     tool = FakeVikingSearchTool(client)
 
-    await tool.execute(ToolContext(actor_peer_id="cli-user"), query="steam")
+    result = await tool.execute(ToolContext(actor_peer_id="cli-user"), query="steam")
 
     target_uris = [call["target_uri"] for call in client.search_calls]
     assert target_uris == ["viking://resources/"]
+    assert result.metadata["api_token_usage"] == {
+        "llm_input_tokens": 2,
+        "llm_output_tokens": 3,
+        "embedding_tokens": 5,
+    }
+    assert result.metadata["telemetry_collected"] is True
 
 
 @pytest.mark.asyncio

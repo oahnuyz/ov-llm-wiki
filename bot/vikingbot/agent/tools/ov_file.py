@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 from loguru import logger
 
-from vikingbot.agent.tools.base import Tool, ToolContext
+from vikingbot.agent.tools.base import Tool, ToolContext, ToolResult
 from vikingbot.openviking_mount.ov_server import VikingClient
 
 if TYPE_CHECKING:
@@ -363,6 +363,41 @@ class VikingSearchTool(OVFileTool):
         return grouped
 
     @staticmethod
+    def _telemetry_token_usage(result: Any) -> tuple[dict[str, int], bool]:
+        telemetry = result.get("telemetry", {}) if isinstance(result, dict) else {}
+        summary = telemetry.get("summary", {}) if isinstance(telemetry, dict) else {}
+        tokens = summary.get("tokens", {}) if isinstance(summary, dict) else {}
+        llm = tokens.get("llm", {}) if isinstance(tokens, dict) else {}
+        embedding = tokens.get("embedding", {}) if isinstance(tokens, dict) else {}
+        return (
+            {
+                "llm_input_tokens": int(llm.get("input", 0) or 0),
+                "llm_output_tokens": int(llm.get("output", 0) or 0),
+                "embedding_tokens": int(embedding.get("total", 0) or 0),
+            },
+            isinstance(tokens, dict) and "embedding" in tokens,
+        )
+
+    @staticmethod
+    def _add_token_usage(total: dict[str, int], current: dict[str, int]) -> None:
+        for key in total:
+            total[key] += int(current.get(key, 0) or 0)
+
+    @staticmethod
+    def _result_with_usage(
+        value: str,
+        usage: dict[str, int],
+        telemetry_collected: bool,
+    ) -> ToolResult:
+        return ToolResult(
+            value,
+            metadata={
+                "api_token_usage": usage,
+                "telemetry_collected": telemetry_collected,
+            },
+        )
+
+    @staticmethod
     def _build_group_json(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         group_items: list[dict[str, Any]] = []
         for index, item in enumerate(items, 1):
@@ -412,6 +447,12 @@ class VikingSearchTool(OVFileTool):
                 "resource": [],
                 "skill": [],
             }
+            api_token_usage = {
+                "llm_input_tokens": 0,
+                "llm_output_tokens": 0,
+                "embedding_tokens": 0,
+            }
+            telemetry_collected = True
 
             if (
                 not target_uri
@@ -472,15 +513,29 @@ class VikingSearchTool(OVFileTool):
                 if search_user_id:
                     search_kwargs["user_id"] = search_user_id
                 results = await client.search(query, **search_kwargs)
+                current_usage, current_telemetry_collected = self._telemetry_token_usage(results)
+                telemetry_collected = telemetry_collected and current_telemetry_collected
+                self._add_token_usage(
+                    api_token_usage,
+                    current_usage,
+                )
                 filtered_items = self._filter_search_items(results, min_score=min_score)
                 for item_type, items in filtered_items.items():
                     grouped_items[item_type].extend(items)
 
             total = sum(len(items) for items in grouped_items.values())
             if total == 0:
-                return f"No results found for query: {query}"
+                return self._result_with_usage(
+                    f"No results found for query: {query}",
+                    api_token_usage,
+                    telemetry_collected,
+                )
 
-            return self._format_search_items_json(grouped_items, min_score=min_score)
+            return self._result_with_usage(
+                self._format_search_items_json(grouped_items, min_score=min_score),
+                api_token_usage,
+                telemetry_collected,
+            )
         except Exception as e:
             return f"Error searching Viking: {str(e)}"
         finally:

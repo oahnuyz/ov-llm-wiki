@@ -123,6 +123,7 @@ class SingleTurnChannel(BaseChannel):
                     "time_cost": msg.time_cost,
                     "iteration": msg.iteration,
                     "tools_used_names": msg.tools_used_names,
+                    "tools_used": msg.tools_used,
                     "trace": msg.metadata.get("trace_messages", []),
                 }
                 msg.content = json.dumps(output, ensure_ascii=False)
