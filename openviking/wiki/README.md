@@ -40,13 +40,11 @@ openviking/wiki/
 ├── cards.py
 │   └── 为资源文档和 Wiki 节点生成 Document Card。
 ├── nodes.py
-│   └── 发现底层节点和父层节点。
+│   └── 按批次执行候选操作，并物化当前层的暂定节点。
 ├── assignments.py
-│   └── 把节点发现结果里的来源 ID 确定性转换成 SourceRef。
+│   └── 把候选物化结果里的来源 ID 确定性转换成 SourceRef。
 ├── documents.py
 │   └── 生成节点 Markdown 正文，并处理结构化输出重试。
-├── layer_decision.py
-│   └── 判断是否继续向上生成父层节点。
 ├── content_loader.py
 │   └── 服务侧构建时，从 VikingFS/VikingDB 加载 summary 或 raw chunk。
 └── pipeline.py
@@ -58,8 +56,8 @@ openviking/wiki/
 1. `schemas.py`：先看最终数据契约。
 2. `document_manifest.py`、`service.py`：看独立接口如何把资源 root 展开成文档输入。
 3. `prompts.py` 和 `openviking/prompts/templates/wiki/`：看每一步给模型的输入。
-4. `cards.py`、`nodes.py`、`assignments.py`、`documents.py`、`layer_decision.py`：按阶段看行为。
-5. `pipeline.py`：看编排、过滤和写入时机。
+4. `cards.py`、`nodes.py`、`assignments.py`、`documents.py`：按阶段看行为。
+5. `pipeline.py`：看编排和写入时机。
 6. `content_loader.py`、`writer.py`：看服务侧如何加载内容和写产物。
 
 ## 生成流程
@@ -67,11 +65,11 @@ openviking/wiki/
 ```text
 资源文档
   -> Document Cards
-  -> 节点发现
+  -> 按批次流式候选聚合
   -> SourceRef 构造
   -> 节点正文
   -> 节点 card
-  -> 可选上层节点发现
+  -> 暂定节点生成 Node Card 后继续下一层
   -> Manifest 和运行日志
 ```
 
@@ -155,13 +153,13 @@ viking://resources/qasper_30_processed_docs/nested/paper_b
 
 ### 节点发现与节点 card
 
-节点从上一层 source cards 中发现。第一层的 source cards 是原始文档 cards；更高层的 source cards 是下层节点生成后的 node cards。模型返回候选节点，以及每个节点由哪些 `source_id` 支撑。代码随后：
+节点从上一层 source cards 中发现。第一层的 source cards 是原始文档 cards；更高层的 source cards 是下层节点生成后的 node cards。模型按批次返回严格的候选操作 JSON。代码按数组顺序执行操作，跨批次维护候选状态，并在所有批次结束后：
 
-- 规范化 `node_id`；
+- 根据候选成员数推导 pending/provisional；
+- 删除仍只有一个 card 的 pending 候选；
+- 将至少包含两个 card 的 provisional 候选物化为 WikiNode；
 - 基于已知 `DocumentCard` 构造 `SourceRef`；
-- 用 `min_refs_per_node` 过滤来源不足的节点；
-- 为保留下来的 active 节点写正文文档；
-- 正文生成完成后，再基于 `WikiNode.title/scope` 和正文文档生成 `nodes/<node_id>/card.md/json`。
+- 生成节点正文和 `nodes/<node_id>/card.md/json`。
 
 `assignments.py` 不调用 LLM。它只校验模型返回的来源 ID 是否存在，并用已知 card 构造 SourceRef。
 
@@ -171,7 +169,7 @@ viking://resources/qasper_30_processed_docs/nested/paper_b
 
 上层正文 prompt 的重点是综合：输出应围绕当前层知识点组织，而不是按照 source 顺序逐个总结。
 
-是否继续向上由 `LayerDecisionRunner` 判断，同时受 `max_depth` 限制。上层节点还要满足 `min_child_nodes_per_parent`。同一个下层节点可以属于多个上层节点，因此 Wiki 结构是 DAG，不是严格树。
+只要当前层产生 provisional 节点，就把这些新生成的 Node Card 作为下一层输入；如果当前层清理后没有 provisional 候选，候选列表为空，聚合立即停止。不存在固定最大层数或额外的继续判断。同一个下层节点可以属于多个上层节点，因此 Wiki 结构是 DAG，而不是严格树。
 
 ### Bot context tree
 
@@ -211,7 +209,7 @@ viking://wiki/my_wiki/
 
 关键文件：
 
-- `nodes.json`：所有发现节点，包括层级、父子关系和 rejected 节点。
+- `nodes.json`：所有已物化节点，包括层级和父子关系；pending 候选不会写入。
 - `source_assignments.json`：节点级来源引用和未分配来源。
 - `cards/*.card.json`：原始文档的结构化 card。
 - `cards/*.card.md`：原始文档的人类可读 card。
@@ -230,11 +228,10 @@ viking://wiki/my_wiki/
 
 当前会调用 LLM 的阶段：
 
-- `document_card`
-- `node_discovery`
+- `doc_card`
+- `candidate_aggregation`
 - `node_documents`
 - `node_card`
-- `next_layer_decision`
 
 文档生成阶段带结构化输出重试：如果模型返回的 JSON 外层可解析，但字段不符合 Pydantic 契约或生成了空 documents，会用同一个干净 prompt 最多重试 3 次。重试 prompt 不追加 Pydantic 错误细节，避免污染模型注意力。
 
@@ -295,13 +292,9 @@ add_resource -> build_wiki -> clear_wiki
 
 | 参数 | 含义 | 默认值 |
 | --- | --- | --- |
-| `max_depth` | 最多生成几层 Wiki 节点 | `6` |
-| `min_refs_per_node` | 底层节点最少需要多少个文档来源 | `3` |
-| `min_child_nodes_per_parent` | 父节点最少需要多少个子节点 | `3` |
+| `aggregation_batch_size` | 每批发送给候选聚合 LLM 的 card 数量上限 | `15` |
 | `max_concurrent_cards` | Document Card 并发生成数 | `10` |
-| `max_concurrent_nodes` | 节点正文并发生成数 | `4` |
-
-有些配置字段仍是扩展预留。判断真实行为时，以 `pipeline.py` 中的过滤和编排逻辑为准。
+| `max_concurrent_nodes` | 节点正文和 Node Card 并发生成数 | `10` |
 
 ## 排查问题
 
@@ -313,11 +306,10 @@ add_resource -> build_wiki -> clear_wiki
 
 如果没有生成节点正文：
 
-1. 看 `nodes.json`，确认节点是 `active` 还是 `rejected`。
-2. 看 `source_assignments.json`，确认来源数量是否足够。
-3. 检查 `min_refs_per_node` 或 `min_child_nodes_per_parent` 是否过严。
-4. 看 `run/prompts.jsonl`，确认该阶段真实输入。
-5. 看 `run/raw_outputs.jsonl`，确认模型结构化输出。
+1. 看 `nodes.json`，确认当前层是否物化了 provisional 节点。
+2. 看 `source_assignments.json`，确认候选成员是否正确。
+3. 看 `run/prompts.jsonl`，确认各批次的 `existing_candidates` 和 `current_batch_cards` 输入。
+4. 看 `run/raw_outputs.jsonl`，确认模型的有序 operations 输出。
 
 如果是模型输出不稳定：
 

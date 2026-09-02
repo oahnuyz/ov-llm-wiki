@@ -1,53 +1,21 @@
-from openviking.wiki.pipeline import _assign_parent_node_links, _reject_nodes_with_insufficient_refs
-from openviking.wiki.schemas import (
-    SourceAssignmentResult,
-    SourceRef,
-    WikiNode,
-)
+from openviking.wiki.pipeline import _assign_parent_node_links, _with_child_node_ids_from_refs_for_layer
+from openviking.wiki.schemas import SourceAssignmentResult, SourceRef, WikiNode
 
 
-def test_parent_layer_keeps_parent_with_enough_child_nodes():
-    parent = _node("parent", depth=3)
-    result = _assignment_result("parent", ["child_a", "child_b", "child_c"])
-
-    layer_nodes, active_nodes, filtered_result = _reject_nodes_with_insufficient_refs(
-        [parent],
-        [parent],
-        result,
-        min_sources=3,
-        depth=3,
-    )
-
-    assert active_nodes[0].status == "active"
-    assert layer_nodes[0].child_node_ids == ["child_a", "child_b", "child_c"]
-    assert [ref.doc_id for ref in filtered_result.source_refs_by_node["parent"]] == [
-        "child_a",
-        "child_b",
-        "child_c",
-    ]
-
-
-def test_parent_layer_rejects_parent_with_too_few_child_nodes():
-    parent = _node("parent", depth=3)
+def test_parent_node_records_all_child_node_ids():
+    parent = _node("parent", depth=2)
     result = _assignment_result("parent", ["child_a", "child_b"])
 
-    layer_nodes, active_nodes, _ = _reject_nodes_with_insufficient_refs(
-        [parent],
-        [parent],
-        result,
-        min_sources=3,
-        depth=3,
-    )
+    updated = _with_child_node_ids_from_refs_for_layer([parent], result)
 
-    assert active_nodes == []
-    assert layer_nodes[0].status == "rejected"
+    assert updated[0].child_node_ids == ["child_a", "child_b"]
 
 
 def test_child_node_can_have_multiple_parent_nodes():
-    child = _node("child_a", depth=2)
+    child = _node("child_a", depth=1)
     parents = [
-        _node("parent_a", depth=3).model_copy(update={"child_node_ids": ["child_a"]}),
-        _node("parent_b", depth=3).model_copy(update={"child_node_ids": ["child_a"]}),
+        _node("parent_a", depth=2).model_copy(update={"child_node_ids": ["child_a"]}),
+        _node("parent_b", depth=2).model_copy(update={"child_node_ids": ["child_a"]}),
     ]
 
     linked_nodes = _assign_parent_node_links([child], parents)
@@ -57,9 +25,7 @@ def test_child_node_can_have_multiple_parent_nodes():
 
 def _assignment_result(node_id: str, child_node_ids: list[str]) -> SourceAssignmentResult:
     refs = [_source_ref(child_node_id) for child_node_id in child_node_ids]
-    return SourceAssignmentResult(
-        source_refs_by_node={node_id: refs},
-    )
+    return SourceAssignmentResult(source_refs_by_node={node_id: refs})
 
 
 def _node(node_id: str, depth: int) -> WikiNode:

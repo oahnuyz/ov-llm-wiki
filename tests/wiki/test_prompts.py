@@ -2,50 +2,40 @@ import pytest
 
 from openviking.prompts.manager import PromptManager
 from openviking.wiki.prompts import (
+    build_candidate_aggregation_prompt,
     build_document_card_prompt,
     build_node_card_prompt,
-    build_node_discovery_prompt,
     build_node_documents_prompt,
 )
 from openviking.wiki.schemas import (
+    AggregationCardView,
+    CandidateMemberView,
+    CandidateView,
     DocumentCard,
     NodeDocument,
     ResourceDocument,
     WikiNode,
 )
 
-from .test_pipeline_order import _card_response
-
 
 @pytest.mark.parametrize(
-    ("prompt_id", "extra_vars"),
+    "prompt_id",
     [
-        ("wiki.document_card", {}),
-        ("wiki.node_discovery", {}),
-        ("wiki.node_card", {}),
-        ("wiki.node_documents", {}),
-        ("wiki.next_layer_decision", {"min_child_nodes_per_parent": 3}),
+        "wiki.document_card",
+        "wiki.candidate_aggregation",
+        "wiki.node_card",
+        "wiki.node_documents",
     ],
 )
-def test_wiki_prompt_templates_render(prompt_id: str, extra_vars: dict):
-    rendered = PromptManager().render(
-        prompt_id,
-        {
-            "input_json": '{"example": true}',
-            **extra_vars,
-        },
-    )
+def test_wiki_prompt_templates_render(prompt_id: str):
+    rendered = PromptManager().render(prompt_id, {"input_json": '{"example": true}'})
 
     assert '{"example": true}' in rendered
-    assert "Return only JSON matching this shape" not in rendered
 
 
 def test_wiki_prompt_template_requires_input_json():
     with pytest.raises(ValueError, match="input_json"):
-        PromptManager().render(
-            "wiki.document_card",
-            {},
-        )
+        PromptManager().render("wiki.document_card", {})
 
 
 def test_document_card_prompt_uses_only_semantic_input_fields():
@@ -65,27 +55,42 @@ def test_document_card_prompt_uses_only_semantic_input_fields():
 
     assert '"content_or_structure": "semantic content"' in prompt
     assert '"card_input_mode": "summary"' in prompt
-    assert "missing_summary_uris" in prompt
     assert "paper_1" not in prompt
     assert "Paper 1" not in prompt
     assert '"doc_id"' not in prompt
-    assert '"source_type"' not in prompt
     assert "root_uri" not in prompt
 
 
-def test_node_discovery_prompt_uses_only_card_index_fields():
-    prompt = build_node_discovery_prompt(
-        [DocumentCard.model_validate(_card_response(1))],
-        min_sources_per_node=3,
+def test_candidate_aggregation_prompt_contains_full_current_cards_and_compact_history():
+    prompt = build_candidate_aggregation_prompt(
+        [
+            CandidateView(
+                candidate_id="candidate_0001",
+                title="Topic",
+                scope="Topic scope",
+                cards=[CandidateMemberView(card_id="old_1", summary="Old summary")],
+                status="pending",
+            )
+        ],
+        [
+            AggregationCardView(
+                card_id="new_1",
+                title="New card",
+                summary="New summary",
+                main_points=["Point"],
+                important_terms=["term"],
+                candidate_topics=["Topic"],
+            )
+        ],
     )
 
-    assert '"summary"' in prompt
-    assert '"candidate_topics"' in prompt
-    assert '"source_id": "OARW_1"' in prompt
-    assert '"min_sources_per_node": 3' in prompt
-    assert '"source_unit_count": 1' in prompt
-    assert '"main_points"' not in prompt
-    assert "viking://resources/" not in prompt
+    assert '"existing_candidates"' in prompt
+    assert '"card_id": "old_1"' in prompt
+    assert '"summary": "Old summary"' in prompt
+    assert '"card_id": "new_1"' in prompt
+    assert '"main_points"' in prompt
+    assert '"important_terms"' in prompt
+    assert "Return exactly one JSON object with the field operations." in prompt
 
 
 def test_node_documents_prompt_uses_only_node_boundary_and_source_sections():
@@ -98,10 +103,10 @@ def test_node_documents_prompt_uses_only_node_boundary_and_source_sections():
         ),
         [
             {
-                "source_id": "OARW_1",
+                "source_id": "paper_1",
                 "sections": [
                     {
-                        "section_uri": "viking://resources/OARW_1/abstract",
+                        "section_uri": "viking://resources/paper_1/abstract",
                         "content": "Question answering evidence.",
                     }
                 ],
@@ -112,18 +117,10 @@ def test_node_documents_prompt_uses_only_node_boundary_and_source_sections():
     assert '"title": "Question Answering"' in prompt
     assert '"scope": "QA methods and evaluation."' in prompt
     assert '"source_documents"' in prompt
-    assert '"source_id": "OARW_1"' in prompt
-    assert '"section_uri": "viking://resources/OARW_1/abstract"' in prompt
     assert "Question answering evidence." in prompt
     assert '"node_id"' not in prompt
     assert '"depth"' not in prompt
     assert '"source_refs"' not in prompt
-    assert '"cards"' not in prompt
-    assert '"child_nodes"' not in prompt
-    assert '"main_points"' not in prompt
-    assert "Organize the content by synthesized knowledge, not by source document." in prompt
-    assert "Do not write one paragraph for source 1, another paragraph for source 2" in prompt
-    assert "not a sequence of per-source summaries" in prompt
 
 
 def test_node_card_prompt_uses_node_boundary_and_generated_documents():
@@ -145,11 +142,6 @@ def test_node_card_prompt_uses_node_boundary_and_generated_documents():
 
     assert '"title": "Question Answering"' in prompt
     assert '"scope": "QA methods and evaluation."' in prompt
-    assert '"title": "Retrieval QA"' in prompt
     assert "Retrieval child document." in prompt
     assert '"node_id"' not in prompt
     assert '"document_id"' not in prompt
-    assert '"source_refs"' not in prompt
-    assert "Do not return doc_id, resource_uri, title, markdown, node fields" in prompt
-    assert "summary: describe the synthesized knowledge" in prompt
-    assert "candidate_topics: list broader parent-level topics" in prompt

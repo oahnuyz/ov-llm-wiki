@@ -11,7 +11,6 @@ from .cards import DocumentCardGenerator
 from .config import WikiConfig
 from .content_loader import WikiCardInputMode, WikiContentLoader
 from .documents import NodeContentGenerator
-from .layer_decision import LayerDecisionRunner
 from .llm import WikiLLMRunner
 from .nodes import NodeDiscoveryRunner
 from .schemas import (
@@ -70,7 +69,6 @@ class WikiPipeline:
         self.node_discovery = NodeDiscoveryRunner(self.llm, self.config)
         self.source_ref_builder = SourceRefBuilder(self.config)
         self.content_generator = NodeContentGenerator(self.llm)
-        self.layer_decision_runner = LayerDecisionRunner(self.llm)
 
     async def run_from_inputs(
         self,
@@ -148,44 +146,35 @@ class WikiPipeline:
         all_source_refs_by_node: dict[str, list[SourceRef]] = {}
         all_unassigned_source_ids: list[str] = []
         all_contexts: list[GeneratedNodeContext] = []
-        previous_layer_cards: list[DocumentCard] = []
+        current_layer_cards: list[DocumentCard] = list(cards)
         reserved_node_ids = {card.doc_id for card in cards}
 
-        for depth in range(1, self.config.limits.max_depth + 1):
-            source_cards = cards if depth == 1 else previous_layer_cards
-            if depth == 1:
-                min_sources = self.config.limits.min_refs_per_node
-                logger.info("[Wiki] Discovering bottom-layer nodes from %d card topics", len(source_cards))
-            else:
-                min_sources = self.config.limits.min_child_nodes_per_parent
-                logger.info(
-                    "[Wiki] Discovering depth=%d parent nodes from %d previous-layer cards",
-                    depth,
-                    len(source_cards),
-                )
+        depth = 1
+        while current_layer_cards:
+            source_cards = current_layer_cards
+            logger.info(
+                "[Wiki] Discovering depth=%d nodes from %d current-layer cards",
+                depth,
+                len(source_cards),
+            )
             discovery = await self.node_discovery.discover_layer(
                 source_cards,
                 depth=depth,
-                min_sources_per_node=min_sources,
                 reserved_node_ids=reserved_node_ids,
             )
             layer_nodes = discovery.nodes
-
-            active_nodes = [node for node in layer_nodes if node.status == "active"]
             logger.info(
-                "[Wiki] Depth=%d discovered %d nodes (%d active)",
+                "[Wiki] Depth=%d discovered %d provisional nodes",
                 depth,
                 len(layer_nodes),
-                len(active_nodes),
             )
-            if not active_nodes:
-                if depth == 1:
-                    raise RuntimeError("bottom layer produced no active nodes")
+            if not layer_nodes:
+                logger.info("[Wiki] Depth=%d produced no provisional candidates; stopping", depth)
                 break
 
             logger.info(
                 "[Wiki] Building source refs for %d nodes from %d source cards",
-                len(active_nodes),
+                len(layer_nodes),
                 len(source_cards),
             )
             assignment_result = SourceAssignmentResult(
@@ -201,21 +190,9 @@ class WikiPipeline:
                 sum(len(refs) for refs in assignment_result.source_refs_by_node.values()),
             )
 
-            layer_nodes, active_nodes, assignment_result = _reject_nodes_with_insufficient_refs(
-                layer_nodes,
-                active_nodes,
-                assignment_result,
-                min_sources=min_sources,
-                depth=depth,
-            )
-            if not active_nodes:
-                if depth == 1:
-                    raise RuntimeError("bottom layer produced no supported active nodes")
-                break
-            logger.info("[Wiki] Depth=%d retained %d supported active nodes", depth, len(active_nodes))
-
+            layer_nodes = _with_child_node_ids_from_refs_for_layer(layer_nodes, assignment_result)
             if depth > 1:
-                all_nodes = _assign_parent_node_links(all_nodes, active_nodes)
+                all_nodes = _assign_parent_node_links(all_nodes, layer_nodes)
 
             all_nodes.extend(layer_nodes)
             reserved_node_ids.update(node.node_id for node in layer_nodes)
@@ -234,14 +211,14 @@ class WikiPipeline:
             )
 
             layer_contexts = await self._generate_layer_contexts(
-                active_nodes,
+                layer_nodes,
                 assignment_result,
                 source_documents_by_id,
                 depth=depth,
             )
             all_contexts.extend(layer_contexts)
-            previous_layer_cards = [context.card for context in layer_contexts]
-            all_cards.extend(previous_layer_cards)
+            current_layer_cards = [context.card for context in layer_contexts]
+            all_cards.extend(current_layer_cards)
             source_documents_by_id.update(
                 {
                     context.node.node_id: _resource_document_for_node(self.config, context)
@@ -258,16 +235,7 @@ class WikiPipeline:
             artifacts.node_contexts = all_contexts
             artifacts.cards = all_cards
 
-            if depth >= self.config.limits.max_depth:
-                break
-
-            continue_upward = await self.layer_decision_runner.should_continue_upward(
-                layer_contexts,
-                min_child_nodes_per_parent=self.config.limits.min_child_nodes_per_parent,
-            )
-            logger.info("[Wiki] Depth=%d continue_upward=%s", depth, continue_upward)
-            if not continue_upward:
-                break
+            depth += 1
 
         await self._write_run_records()
         logger.info(
@@ -281,7 +249,7 @@ class WikiPipeline:
 
     async def _generate_layer_contexts(
         self,
-        active_nodes: list[WikiNode],
+        nodes: list[WikiNode],
         assignment_result: SourceAssignmentResult,
         source_documents_by_id: dict[str, ResourceDocument],
         *,
@@ -289,11 +257,11 @@ class WikiPipeline:
     ) -> list[GeneratedNodeContext]:
         max_concurrent = max(1, self.config.limits.max_concurrent_nodes)
         sem = asyncio.Semaphore(max_concurrent)
-        contexts: list[GeneratedNodeContext | None] = [None] * len(active_nodes)
+        contexts: list[GeneratedNodeContext | None] = [None] * len(nodes)
         logger.info(
             "[Wiki] Depth=%d generating %d node contexts with max_concurrent=%d",
             depth,
-            len(active_nodes),
+            len(nodes),
             max_concurrent,
         )
 
@@ -307,7 +275,7 @@ class WikiPipeline:
                 )
                 logger.info("[Wiki] Depth=%d generated node context: %s", depth, node.node_id)
 
-        await asyncio.gather(*[_generate_one(index, node) for index, node in enumerate(active_nodes)])
+        await asyncio.gather(*[_generate_one(index, node) for index, node in enumerate(nodes)])
         if any(context is None for context in contexts):
             raise RuntimeError("node context generation did not produce all contexts")
         return [context for context in contexts if context is not None]
@@ -416,55 +384,6 @@ def _redact_sensitive_config(value: object) -> object:
     return value
 
 
-def _reject_nodes_with_insufficient_refs(
-    layer_nodes: list[WikiNode],
-    active_nodes: list[WikiNode],
-    assignment_result: SourceAssignmentResult,
-    min_sources: int,
-    *,
-    depth: int,
-) -> tuple[list[WikiNode], list[WikiNode], SourceAssignmentResult]:
-    min_sources = max(1, min_sources)
-    is_parent_layer = depth > 1
-    unsupported_node_ids = {
-        node.node_id
-        for node in active_nodes
-        if len(assignment_result.source_refs_by_node.get(node.node_id, [])) < min_sources
-    }
-
-    updated_layer_nodes = [
-        _with_child_node_ids_from_refs(
-            node.model_copy(update={"status": "rejected"})
-            if node.node_id in unsupported_node_ids
-            else node,
-            assignment_result,
-        )
-        for node in layer_nodes
-    ]
-    if not unsupported_node_ids and not is_parent_layer:
-        return layer_nodes, active_nodes, assignment_result
-
-    supported_node_ids = {
-        node.node_id
-        for node in updated_layer_nodes
-        if node.status == "active"
-    }
-    filtered_assignment_result = assignment_result.model_copy(
-        update={
-            "source_refs_by_node": {
-                node_id: refs
-                for node_id, refs in assignment_result.source_refs_by_node.items()
-                if node_id in supported_node_ids
-            },
-        }
-    )
-    return (
-        updated_layer_nodes,
-        [node for node in updated_layer_nodes if node.status == "active"],
-        filtered_assignment_result,
-    )
-
-
 def _with_child_node_ids_from_refs(
     node: WikiNode,
     assignment_result: SourceAssignmentResult,
@@ -477,6 +396,13 @@ def _with_child_node_ids_from_refs(
     if not child_node_ids:
         return node
     return node.model_copy(update={"child_node_ids": child_node_ids})
+
+
+def _with_child_node_ids_from_refs_for_layer(
+    nodes: list[WikiNode],
+    assignment_result: SourceAssignmentResult,
+) -> list[WikiNode]:
+    return [_with_child_node_ids_from_refs(node, assignment_result) for node in nodes]
 
 
 def _assign_parent_node_links(

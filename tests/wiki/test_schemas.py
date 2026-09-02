@@ -2,9 +2,9 @@ import pytest
 from pydantic import ValidationError
 
 from openviking.wiki.schemas import (
+    CandidateOperationsResponse,
     DocumentCard,
     WikiNode,
-    WikiSourceNodeDiscoveryResponse,
 )
 
 
@@ -33,24 +33,27 @@ def test_document_card_allows_wiki_node_uri():
     assert card.resource_uri == "viking://wiki/nodes/question_answering/"
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "nodes": [
-                {
-                    "node_id": "question_answering",
-                    "title": "Question Answering",
-                    "scope": "QA papers",
-                    "supporting_source_ids": ["doc_1"],
-                }
-            ]
-        },
-    ],
-)
-def test_node_discovery_rejects_internal_node_fields(payload):
+def test_candidate_operations_reject_unknown_fields():
     with pytest.raises(ValidationError):
-        WikiSourceNodeDiscoveryResponse.model_validate(payload)
+        CandidateOperationsResponse.model_validate(
+            {
+                "operations": [
+                    {
+                        "op": "create_candidate",
+                        "candidate_ref": "topic",
+                        "title": "Topic",
+                        "scope": "Topic scope",
+                        "card_ids": ["doc_1"],
+                        "reason": "extra",
+                    }
+                ]
+            }
+        )
+
+
+def test_candidate_operations_require_operations_field():
+    with pytest.raises(ValidationError):
+        CandidateOperationsResponse.model_validate({})
 
 
 def test_node_id_must_be_snake_case():

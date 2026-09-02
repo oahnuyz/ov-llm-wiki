@@ -8,12 +8,8 @@ from typing import Any
 
 @dataclass
 class WikiGenerationLimits:
-    # 最多向上聚合多少层 Wiki 节点。
-    max_depth: int = 6
-    # 父节点至少要覆盖多少个子节点，否则不会保留。
-    min_child_nodes_per_parent: int = 3
-    # 底层节点至少要绑定多少个来源引用，否则会被拒绝。
-    min_refs_per_node: int = 3
+    # 聚合阶段每次发送给 LLM 的 card 数量上限。
+    aggregation_batch_size: int = 15
     # 同时发起多少个文档卡片生成请求。
     max_concurrent_cards: int = 10
     # 同时发起多少个节点内容生成请求。
@@ -28,7 +24,7 @@ class WikiConfig:
     resource_root_uri: str = "viking://resources/"
     # Wiki 产物写入的根 URI。
     wiki_root_uri: str = "viking://wiki/"
-    # 控制节点数量、层数、过滤阈值和并发量。
+    # 控制聚合批次大小和 LLM 请求并发量。
     limits: WikiGenerationLimits = field(default_factory=WikiGenerationLimits)
     # 传给底层 VLM/LLM 的模型配置。
     vlm_config: dict[str, Any] | None = None

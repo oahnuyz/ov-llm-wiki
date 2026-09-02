@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
@@ -104,33 +104,102 @@ class DocumentCard(DocumentCardContent):
     markdown: str = ""
 
 
+class AggregationCardView(StrictModel):
+    """聚合阶段发送给 LLM 的当前批次 card 视图。"""
+    card_id: NonEmptyStr
+    title: NonEmptyStr
+    summary: NonEmptyStr
+    main_points: NonEmptyStrList
+    important_terms: list[str] = Field(default_factory=list)
+    candidate_topics: NonEmptyStrList
+
+
+class CandidateMemberView(StrictModel):
+    """existing_candidates 中历史成员的精简视图。"""
+    card_id: NonEmptyStr
+    summary: NonEmptyStr
+
+
+class CandidateView(StrictModel):
+    """发送给 LLM 的当前候选节点视图。"""
+    candidate_id: NonEmptyStr
+    title: NonEmptyStr
+    scope: NonEmptyStr
+    cards: list[CandidateMemberView] = Field(min_length=1)
+    status: Literal["pending", "provisional"]
+
+
+class CreateCandidateOperation(StrictModel):
+    op: Literal["create_candidate"]
+    candidate_ref: NonEmptyStr
+    title: NonEmptyStr
+    scope: NonEmptyStr
+    card_ids: NonEmptyStrList
+
+
+class AssignCardsOperation(StrictModel):
+    op: Literal["assign_cards"]
+    candidate_id: NonEmptyStr
+    card_ids: NonEmptyStrList
+
+
+class RenameCandidateOperation(StrictModel):
+    op: Literal["rename_candidate"]
+    candidate_id: NonEmptyStr
+    title: NonEmptyStr
+
+
+class UpdateScopeOperation(StrictModel):
+    op: Literal["update_scope"]
+    candidate_id: NonEmptyStr
+    scope: NonEmptyStr
+
+
+class MergeCandidatesOperation(StrictModel):
+    op: Literal["merge_candidates"]
+    target_candidate_id: NonEmptyStr
+    source_candidate_ids: NonEmptyStrList
+
+
+class SplitCandidateGroup(StrictModel):
+    candidate_ref: NonEmptyStr
+    title: NonEmptyStr
+    scope: NonEmptyStr
+    card_ids: NonEmptyStrList
+
+
+class SplitCandidateOperation(StrictModel):
+    op: Literal["split_candidate"]
+    candidate_id: NonEmptyStr
+    groups: list[SplitCandidateGroup] = Field(min_length=2)
+
+
+CandidateOperation = Annotated[
+    Union[
+        CreateCandidateOperation,
+        AssignCardsOperation,
+        RenameCandidateOperation,
+        UpdateScopeOperation,
+        MergeCandidatesOperation,
+        SplitCandidateOperation,
+    ],
+    Field(discriminator="op"),
+]
+
+
+class CandidateOperationsResponse(StrictModel):
+    """LLM 聚合步骤的严格操作响应。"""
+    operations: list[CandidateOperation]
+
+
 class WikiNode(StrictModel):
     """Wiki 目录图中的内部节点，保存稳定标识、主题边界和层级关系。"""
     node_id: NodeId
     title: NonEmptyStr
-    status: Literal["active", "rejected"] = "active"
     depth: int = Field(ge=1)
     scope: NonEmptyStr
     parent_node_ids: list[str] = Field(default_factory=list)
     child_node_ids: list[str] = Field(default_factory=list)
-
-
-class WikiNodeDiscoveryItem(StrictModel):
-    """模型发现的一个 Wiki 主题，只描述名称和知识边界。"""
-    title: NonEmptyStr = Field(description="面向读者的 Wiki 节点名称")
-    scope: NonEmptyStr = Field(description="节点覆盖的知识范围及明确排除的内容")
-
-
-class WikiSourceNodeDiscoveryItem(WikiNodeDiscoveryItem):
-    """来源 card 聚合结果，同时给出支撑该节点的来源 ID。"""
-    supporting_source_ids: NonEmptyStrList
-    merged_candidate_topics: list[str] = Field(default_factory=list)
-
-
-class WikiSourceNodeDiscoveryResponse(StrictModel):
-    """节点聚合步骤的结构化响应，包含节点和来源归属关系。"""
-    nodes: list[WikiSourceNodeDiscoveryItem]
-    unassigned_source_ids: list[str] = Field(default_factory=list)
 
 
 class SourceRef(StrictModel):
@@ -178,12 +247,6 @@ class NodeDocument(NodeDocumentContent):
 class NodeDocumentsResponse(StrictModel):
     """节点正文生成步骤的结构化响应。"""
     documents: list[NodeDocumentContent]
-
-
-class NextLayerDecisionResponse(StrictModel):
-    """向上聚合决策步骤的结构化响应。"""
-    continue_upward: bool
-    reasons: list[str] = Field(default_factory=list)
 
 
 class GeneratedNodeContext(StrictModel):

@@ -1,5 +1,7 @@
 # Wiki 代码阅读笔记
 
+> 说明：本文最初记录的是一次性节点发现实现。当前代码已切换到流式候选聚合；最新的完整契约以 [streaming_aggregation_design.md](streaming_aggregation_design.md) 为准。下文中关于 `LayerDecisionRunner`、`max_depth`、来源数量过滤和 `active/rejected` 的描述属于历史实现。
+
 本文档按实际阅读顺序记录 `openviking/wiki` 相关代码的逐文件、逐块说明。目标是减少读代码时的来回跳转：先建立数据契约和底层工具概念，再读阶段实现、总编排和服务入口。
 
 ## 阅读顺序

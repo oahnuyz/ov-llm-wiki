@@ -1,4 +1,4 @@
-"""Build source refs for active Wiki nodes from discovery assignments."""
+"""Build source refs for materialized Wiki nodes from candidate assignments."""
 
 from __future__ import annotations
 

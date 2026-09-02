@@ -7,8 +7,8 @@ import json
 from openviking.prompts.manager import PromptManager
 
 from .schemas import (
-    DocumentCard,
-    GeneratedNodeContext,
+    AggregationCardView,
+    CandidateView,
     NodeDocument,
     ResourceDocument,
     WikiNode,
@@ -30,16 +30,16 @@ def build_document_card_prompt(doc: ResourceDocument) -> str:
     return _render_wiki_prompt("wiki.document_card", payload)
 
 
-def build_node_discovery_prompt(
-    cards: list[DocumentCard],
-    min_sources_per_node: int,
+def build_candidate_aggregation_prompt(
+    existing_candidates: list[CandidateView],
+    current_batch_cards: list[AggregationCardView],
 ) -> str:
+    """Build the strict ordered-operation prompt for one aggregation batch."""
     inputs = {
-        "source_unit_count": len(cards),
-        "min_sources_per_node": min_sources_per_node,
-        "source_records": [_source_card_payload(card) for card in cards],
+        "existing_candidates": [candidate.model_dump(mode="json") for candidate in existing_candidates],
+        "current_batch_cards": [card.model_dump(mode="json") for card in current_batch_cards],
     }
-    return _render_wiki_prompt("wiki.node_discovery", inputs)
+    return _render_wiki_prompt("wiki.candidate_aggregation", inputs)
 
 
 def build_node_card_prompt(node: WikiNode, documents: list[NodeDocument]) -> str:
@@ -62,41 +62,6 @@ def build_node_documents_prompt(
         "source_documents": source_documents,
     }
     return _render_wiki_prompt("wiki.node_documents", inputs)
-
-
-def build_next_layer_decision_prompt(
-    child_nodes: list[GeneratedNodeContext],
-    min_child_nodes_per_parent: int = 3,
-) -> str:
-    inputs = {
-        "child_nodes": [_child_node_payload(context) for context in child_nodes],
-    }
-    return _render_wiki_prompt(
-        "wiki.next_layer_decision",
-        inputs,
-        min_child_nodes_per_parent=min_child_nodes_per_parent,
-    )
-
-
-def _child_node_payload(context: GeneratedNodeContext) -> dict:
-    return {
-        "node": context.node.model_dump(mode="json"),
-        "card": context.card.model_dump(
-            include={"summary", "main_points", "important_terms", "candidate_topics"},
-            mode="json",
-        ),
-        "documents": [document.model_dump(mode="json") for document in context.documents],
-        "source_refs": [ref.model_dump(mode="json") for ref in context.source_refs],
-    }
-
-
-def _source_card_payload(card: DocumentCard) -> dict:
-    return {
-        "source_id": card.doc_id,
-        "title": card.title,
-        "summary": card.summary,
-        "candidate_topics": card.candidate_topics,
-    }
 
 
 def _render_wiki_prompt(prompt_id: str, payload: object, **extra_vars: object) -> str:

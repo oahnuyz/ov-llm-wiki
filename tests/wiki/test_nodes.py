@@ -1,223 +1,168 @@
 import pytest
 
-from openviking.wiki.config import WikiConfig
+from openviking.wiki.config import WikiConfig, WikiGenerationLimits
 from openviking.wiki.llm import WikiLLMRunner
 from openviking.wiki.nodes import NodeDiscoveryRunner
 from openviking.wiki.schemas import DocumentCard
 
 from .fakes import FakeVLM
-from .test_pipeline_order import _card_response
+
+
+def _card(index: int) -> DocumentCard:
+    return DocumentCard(
+        doc_id=f"card_{index}",
+        resource_uri=f"viking://resources/card_{index}",
+        title=f"Card {index}",
+        summary=f"Summary {index}",
+        main_points=[f"Point {index}"],
+        important_terms=[f"term_{index}"],
+        candidate_topics=["Topic"],
+    )
 
 
 @pytest.mark.asyncio
-async def test_node_discovery_keeps_llm_nodes_for_later_support_filtering():
+async def test_streaming_aggregation_processes_batches_in_order_and_keeps_only_provisional_nodes():
+    cards = [_card(index) for index in range(1, 17)]
     fake_vlm = FakeVLM(
         [
             {
-                "nodes": [
-                    _node("Reading comprehension dataset construction"),
-                    _node("Semi-supervised question answering"),
-                    _node("Cross-modal alignment"),
-                ]
-            }
-        ]
-    )
-    llm = WikiLLMRunner(fake_vlm)
-    runner = NodeDiscoveryRunner(llm, WikiConfig())
-
-    result = await runner.discover_layer(
-        [
-            DocumentCard.model_validate(_card_response(1)),
-            DocumentCard.model_validate(_card_response(2)),
-            DocumentCard.model_validate(_card_response(3)),
-        ],
-        depth=1,
-        min_sources_per_node=3,
-    )
-    nodes = result.nodes
-
-    assert [node.title for node in nodes] == [
-        "Reading comprehension dataset construction",
-        "Semi-supervised question answering",
-        "Cross-modal alignment",
-    ]
-    assert all(node.status == "active" for node in nodes)
-    assert len(result.source_assignments.assignments) == 3
-    node_schema = fake_vlm.schemas[0]["$defs"]["WikiSourceNodeDiscoveryItem"]
-    assert set(node_schema["properties"]) == {
-        "title",
-        "scope",
-        "supporting_source_ids",
-        "merged_candidate_topics",
-    }
-
-
-@pytest.mark.asyncio
-async def test_node_discovery_generates_node_id_and_depth():
-    llm = WikiLLMRunner(
-        FakeVLM(
-            [
-                {
-                    "nodes": [
-                        _node("Question Answering Methods")
-                    ]
-                }
-            ]
-        )
-    )
-    runner = NodeDiscoveryRunner(llm, WikiConfig())
-
-    result = await runner.discover_layer(
-        [
-            DocumentCard.model_validate(_card_response(1)),
-            DocumentCard.model_validate(_card_response(2)),
-            DocumentCard.model_validate(_card_response(3)),
-        ],
-        depth=1,
-        min_sources_per_node=3,
-    )
-    nodes = result.nodes
-
-    assert nodes[0].node_id == "question_answering_methods"
-    assert nodes[0].depth == 1
-    assert nodes[0].status == "active"
-    assert result.source_assignments.assignments[0].source_ids == ["OARW_1", "OARW_2", "OARW_3"]
-
-
-@pytest.mark.asyncio
-async def test_node_discovery_retries_invalid_structured_output_with_same_prompt():
-    fake_vlm = FakeVLM(
-        [
-            {
-                "nodes": [
+                "operations": [
                     {
-                        **_node("Low-resource language processing"),
-                        "supporting_source_ids": [
-                            "OARW_1",
-                            {
-                                "title": "Low-resource language syntactic parsing techniques"
-                            },
-                        ],
+                        "op": "create_candidate",
+                        "candidate_ref": "topic",
+                        "title": "Topic",
+                        "scope": "Topic scope",
+                        "card_ids": [f"card_{index}" for index in range(1, 3)],
                     }
                 ]
             },
             {
-                "nodes": [
-                    _node("Low-resource language processing")
+                "operations": [
+                    {
+                        "op": "assign_cards",
+                        "candidate_id": "candidate_0001",
+                        "card_ids": ["card_16"],
+                    }
+                ]
+            },
+        ]
+    )
+    runner = NodeDiscoveryRunner(
+        WikiLLMRunner(fake_vlm),
+        WikiConfig(limits=WikiGenerationLimits(aggregation_batch_size=15)),
+    )
+
+    result = await runner.discover_layer(cards, depth=1)
+
+    assert len(fake_vlm.calls) == 2
+    assert len(result.nodes) == 1
+    assert result.nodes[0].title == "Topic"
+    assert result.source_assignments.assignments[0].source_ids == ["card_1", "card_2", "card_16"]
+    assert fake_vlm.calls[0].count('"card_id"') == 15
+    assert fake_vlm.calls[1].count('"card_id"') == 16
+
+
+@pytest.mark.asyncio
+async def test_all_pending_candidates_stop_without_materializing_nodes():
+    fake_vlm = FakeVLM([{"operations": []}])
+    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
+
+    result = await runner.discover_layer([_card(1)], depth=1)
+
+    assert result.nodes == []
+    assert result.source_assignments.assignments == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_operation_retries_with_same_prompt():
+    fake_vlm = FakeVLM(
+        [
+            {"operations": [{"op": "assign_cards", "candidate_id": "unknown", "card_ids": ["card_1"]}]},
+            {
+                "operations": [
+                    {
+                        "op": "create_candidate",
+                        "candidate_ref": "topic",
+                        "title": "Topic",
+                        "scope": "Topic scope",
+                        "card_ids": ["card_1", "card_2"],
+                    }
                 ]
             },
         ]
     )
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
 
-    result = await runner.discover_layer(
-        [
-            DocumentCard.model_validate(_card_response(1)),
-            DocumentCard.model_validate(_card_response(2)),
-            DocumentCard.model_validate(_card_response(3)),
-        ],
-        depth=1,
-        min_sources_per_node=3,
+    result = await runner.discover_layer([_card(1), _card(2)], depth=1)
+
+    assert len(fake_vlm.calls) == 2
+    assert fake_vlm.calls[0] == fake_vlm.calls[1]
+    assert result.nodes[0].title == "Topic"
+
+
+def test_split_and_merge_preserve_card_membership():
+    cards = [_card(index) for index in range(1, 4)]
+    by_id = {card.doc_id: card for card in cards}
+    runner = NodeDiscoveryRunner(WikiLLMRunner(FakeVLM([])), WikiConfig())
+    state = runner._apply_batch_result(
+        {
+            "operations": [
+                {
+                    "op": "create_candidate",
+                    "candidate_ref": "a",
+                    "title": "A",
+                    "scope": "A scope",
+                    "card_ids": ["card_1", "card_2"],
+                },
+                {
+                    "op": "create_candidate",
+                    "candidate_ref": "b",
+                    "title": "B",
+                    "scope": "B scope",
+                    "card_ids": ["card_3"],
+                },
+                {
+                    "op": "merge_candidates",
+                    "target_candidate_id": "candidate_0001",
+                    "source_candidate_ids": ["candidate_0002"],
+                },
+            ]
+        },
+        {},
+        by_id,
+        cards,
+    )
+    state = runner._apply_batch_result(
+        {
+            "operations": [
+                {
+                    "op": "split_candidate",
+                    "candidate_id": "candidate_0001",
+                    "groups": [
+                        {
+                            "candidate_ref": "x",
+                            "title": "X",
+                            "scope": "X scope",
+                            "card_ids": ["card_1", "card_3"],
+                        },
+                        {
+                            "candidate_ref": "y",
+                            "title": "Y",
+                            "scope": "Y scope",
+                            "card_ids": ["card_2", "card_3"],
+                        },
+                    ],
+                }
+            ]
+        },
+        state,
+        by_id,
+        [],
     )
 
-    assert result.nodes[0].node_id == "low_resource_language_processing"
-    assert result.source_assignments.assignments[0].source_ids == [
-        "OARW_1",
-        "OARW_2",
-        "OARW_3",
+    assert sorted(card for candidate in state.values() for card in candidate.card_ids) == [
+        "card_1",
+        "card_2",
+        "card_3",
+        "card_3",
     ]
-    assert len(fake_vlm.calls) == 2
-    assert fake_vlm.calls[0] == fake_vlm.calls[1]
-
-
-@pytest.mark.asyncio
-async def test_node_discovery_retries_invalid_json_result_with_same_prompt():
-    fake_vlm = FakeVLM(
-        [
-            None,
-            {
-                "nodes": [
-                    _node("Low-resource language processing")
-                ]
-            },
-        ]
-    )
-    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
-
-    result = await runner.discover_layer(
-        [
-            DocumentCard.model_validate(_card_response(1)),
-            DocumentCard.model_validate(_card_response(2)),
-            DocumentCard.model_validate(_card_response(3)),
-        ],
-        depth=1,
-        min_sources_per_node=3,
-    )
-
-    assert result.nodes[0].node_id == "low_resource_language_processing"
-    assert len(fake_vlm.calls) == 2
-    assert fake_vlm.calls[0] == fake_vlm.calls[1]
-
-
-@pytest.mark.asyncio
-async def test_parent_node_discovery_allows_duplicate_child_parent_assignment():
-    fake_vlm = FakeVLM(
-        [
-            {
-                "nodes": [
-                    _parent_node("Parent A", ["child_a", "child_b", "child_c"]),
-                    _parent_node("Parent B", ["child_c", "child_d", "child_e"]),
-                ]
-            },
-        ]
-    )
-    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
-
-    result = await runner.discover_layer(
-        [
-            _node_card("child_a", "Child A"),
-            _node_card("child_b", "Child B"),
-            _node_card("child_c", "Child C"),
-            _node_card("child_d", "Child D"),
-            _node_card("child_e", "Child E"),
-        ],
-        depth=2,
-        min_sources_per_node=3,
-    )
-
-    source_ids_by_node = {
-        assignment.node_id: assignment.source_ids
-        for assignment in result.source_assignments.assignments
-    }
-    assert source_ids_by_node["parent_a"] == ["child_a", "child_b", "child_c"]
-    assert source_ids_by_node["parent_b"] == ["child_c", "child_d", "child_e"]
-    assert len(fake_vlm.calls) == 1
-
-
-def _node(title: str) -> dict:
-    return {
-        "title": title,
-        "scope": f"{title} scope.",
-        "supporting_source_ids": ["OARW_1", "OARW_2", "OARW_3"],
-        "merged_candidate_topics": [title],
-    }
-
-
-def _parent_node(title: str, child_node_ids: list[str]) -> dict:
-    return {
-        "title": title,
-        "scope": f"{title} scope.",
-        "supporting_source_ids": child_node_ids,
-        "merged_candidate_topics": child_node_ids,
-    }
-
-
-def _node_card(node_id: str, title: str) -> DocumentCard:
-    return DocumentCard(
-        doc_id=node_id,
-        resource_uri=f"viking://wiki/nodes/{node_id}/",
-        title=title,
-        summary=f"{title} summary.",
-        main_points=[f"{title} point."],
-        candidate_topics=[title],
-    )

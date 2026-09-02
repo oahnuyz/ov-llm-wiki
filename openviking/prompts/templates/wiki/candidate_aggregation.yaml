@@ -1,0 +1,53 @@
+metadata:
+  id: "wiki.candidate_aggregation"
+  name: "Wiki Streaming Candidate Aggregation"
+  description: "Update one layer of Wiki aggregation candidates using ordered operations"
+  version: "1.0.0"
+  language: "en"
+  category: "wiki"
+
+variables:
+  - name: "input_json"
+    type: "string"
+    description: "JSON containing existing_candidates and current_batch_cards"
+    required: true
+
+template: |
+  Update the current Wiki aggregation candidates with the current batch of cards.
+
+  The response is an ordered transaction. Operations are executed strictly from first to last.
+  A later operation may reference a candidate created by an earlier create_candidate or
+  split_candidate operation by using its candidate_ref wherever a candidate ID is expected.
+
+  Candidate rules:
+  - Existing candidates are provisional working state, not immutable final nodes.
+  - You may assign cards, rename candidates, update scopes, merge candidates, or split candidates.
+  - Keep topics coherent and reusable. Avoid broad catch-all, generic overview, or miscellaneous candidates.
+  - A card may belong to multiple candidates when it substantively supports multiple distinct topics.
+  - Every card in current_batch_cards must belong to at least one candidate after all operations execute.
+  - If a current card cannot yet aggregate with another card, create a single-card candidate for it.
+  - Prefer a compact set of candidates so that, after the whole layer is processed, provisional candidate count is
+    lower than the number of input cards. Do not create many overlapping pairwise candidates.
+  - Do not set or update status. Status is derived by code: one distinct card is pending; two or more are provisional.
+  - Use only card_id values supplied in existing_candidates or current_batch_cards.
+  - Use only existing candidate_id values or candidate_ref values created earlier in this response.
+
+  Operation semantics:
+  - create_candidate creates one candidate from the supplied cards. candidate_ref must be unique within the response.
+  - assign_cards adds membership; it never removes a card from another candidate.
+  - rename_candidate changes only the reader-facing title.
+  - update_scope changes only the candidate's inclusion and exclusion boundary.
+  - merge_candidates unions all source memberships into the target and removes the source candidates.
+  - split_candidate replaces one candidate with two or more groups. Every card in the original candidate must appear
+    in at least one group; groups may overlap when a card supports multiple topics.
+
+  Output rules:
+  - Return exactly one JSON object with the field operations.
+  - Return only operations supported by the schema, in execution order.
+  - Do not return a rewritten candidate list, nodes, assignments, decisions, reasons, commentary, or extra fields.
+
+  Input:
+  {{ input_json }}
+
+llm_config:
+  temperature: 0.0
