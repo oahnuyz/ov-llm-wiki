@@ -14,14 +14,16 @@ from openviking_cli.session.user_id import UserIdentifier
 
 
 class _FakeVikingFS:
-    def __init__(self, *, rm_error=None, read_files=None, trees=None):
+    def __init__(self, *, rm_error=None, read_files=None, trees=None, listings=None):
         self.rm_calls = []
         self.mv_calls = []
         self.grep_calls = []
         self.tree_calls = []
+        self.ls_calls = []
         self.rm_error = rm_error
         self.read_files = read_files or {}
         self.trees = trees or {}
+        self.listings = listings or {}
 
     async def rm(self, uri, recursive=False, ctx=None):
         self.rm_calls.append({"uri": uri, "recursive": recursive, "ctx": ctx})
@@ -34,6 +36,10 @@ class _FakeVikingFS:
 
     async def read_file(self, uri, ctx=None):
         return self.read_files[uri]
+
+    async def ls(self, uri, **kwargs):
+        self.ls_calls.append({"uri": uri, **kwargs})
+        return self.listings.get(uri.rstrip("/"), [])
 
     async def tree(
         self,
@@ -79,15 +85,16 @@ class _FakeVikingFS:
                 "ctx": ctx,
             }
         )
+        document_uri = uri if uri.endswith(".md") else f"{uri.rstrip('/')}/0001.md"
         return {
             "matches": [
                 {
-                    "uri": f"{uri.rstrip('/')}/0001.md",
+                    "uri": document_uri,
                     "line": 1,
                     "content": "steam match",
                 },
                 {
-                    "uri": uri.replace("/documents/", "/evidence.jsonl"),
+                    "uri": f"{uri.rsplit('/', 1)[0]}/sources/evidence.ref.json",
                     "line": 2,
                     "content": "auxiliary match",
                 },
@@ -233,7 +240,23 @@ async def test_grep_wiki_node_expands_to_node_subtree_documents(request_context)
             ]
         }
     )
-    viking_fs = _FakeVikingFS(read_files={"viking://wiki/nodes.json": nodes_json})
+    node_index_json = json.dumps(
+        {
+            "nodes": {
+                "steam": {"primary_uri": "viking://wiki/nodes/steam/"},
+                "steam_workshop": {
+                    "primary_uri": "viking://wiki/nodes/steam/steam_workshop/"
+                },
+                "steam_security": {"primary_uri": "viking://wiki/nodes/steam_security/"},
+            }
+        }
+    )
+    viking_fs = _FakeVikingFS(
+        read_files={
+            "viking://wiki/nodes.json": nodes_json,
+            "viking://wiki/node_index.json": node_index_json,
+        }
+    )
     service = FSService(viking_fs=viking_fs)
 
     result = await service.grep(
@@ -244,13 +267,13 @@ async def test_grep_wiki_node_expands_to_node_subtree_documents(request_context)
     )
 
     assert [call["uri"] for call in viking_fs.grep_calls] == [
-        "viking://wiki/nodes/steam/documents/",
-        "viking://wiki/nodes/steam_workshop/documents/",
+        "viking://wiki/nodes/steam/0001.md",
+        "viking://wiki/nodes/steam/steam_workshop/0001.md",
     ]
     assert all(call["case_insensitive"] for call in viking_fs.grep_calls)
     assert [match["uri"] for match in result["matches"]] == [
-        "viking://wiki/nodes/steam/documents/0001.md",
-        "viking://wiki/nodes/steam_workshop/documents/0001.md",
+        "viking://wiki/nodes/steam/0001.md",
+        "viking://wiki/nodes/steam/steam_workshop/0001.md",
     ]
 
 
@@ -270,7 +293,7 @@ async def test_grep_wiki_nodes_root_expands_to_all_node_documents(request_contex
     await service.grep("viking://wiki/nodes", "steam", ctx=request_context, node_limit=1)
 
     assert [call["uri"] for call in viking_fs.grep_calls] == [
-        "viking://wiki/nodes/steam/documents/",
+        "viking://wiki/nodes/steam/0001.md",
     ]
     assert viking_fs.grep_calls[0]["node_limit"] == 1
 
@@ -301,7 +324,19 @@ async def test_ls_wiki_nodes_root_lists_logical_root_nodes(request_context):
             ]
         }
     )
-    viking_fs = _FakeVikingFS(read_files={"viking://wiki/nodes.json": nodes_json})
+    root_entries = [
+        {"name": "steam", "uri": "viking://wiki/nodes/steam", "isDir": True, "size": 0},
+        {
+            "name": "steam_security",
+            "uri": "viking://wiki/nodes/steam_security",
+            "isDir": True,
+            "size": 0,
+        },
+    ]
+    viking_fs = _FakeVikingFS(
+        read_files={"viking://wiki/nodes.json": nodes_json},
+        listings={"viking://wiki/nodes": root_entries},
+    )
     service = FSService(viking_fs=viking_fs)
 
     result = await service.ls("viking://wiki/nodes", ctx=request_context, simple=True)
@@ -313,7 +348,7 @@ async def test_ls_wiki_nodes_root_lists_logical_root_nodes(request_context):
 
 
 @pytest.mark.asyncio
-async def test_ls_wiki_node_lists_documents_and_child_nodes(request_context):
+async def test_ls_wiki_node_uses_physical_flat_layout(request_context):
     nodes_json = json.dumps(
         {
             "nodes": [
@@ -338,18 +373,67 @@ async def test_ls_wiki_node_lists_documents_and_child_nodes(request_context):
             ]
         }
     )
-    viking_fs = _FakeVikingFS(read_files={"viking://wiki/nodes.json": nodes_json})
+    node_index_json = json.dumps(
+        {
+            "nodes": {
+                "steam": {"primary_uri": "viking://wiki/nodes/steam/"},
+                "steam_workshop": {
+                    "primary_uri": "viking://wiki/nodes/steam/steam_workshop/"
+                },
+                "steam_security": {"primary_uri": "viking://wiki/nodes/steam_security/"},
+            }
+        }
+    )
+    viking_fs = _FakeVikingFS(
+        read_files={
+            "viking://wiki/nodes.json": nodes_json,
+            "viking://wiki/node_index.json": node_index_json,
+        },
+        listings={
+            "viking://wiki/nodes/steam": [
+                {
+                    "name": "steam_workshop",
+                    "uri": "viking://wiki/nodes/steam/steam_workshop",
+                    "isDir": True,
+                    "size": 0,
+                },
+                {
+                    "name": "sources",
+                    "uri": "viking://wiki/nodes/steam/sources",
+                    "isDir": True,
+                    "size": 0,
+                },
+                {
+                    "name": "0001.md",
+                    "uri": "viking://wiki/nodes/steam/0001.md",
+                    "isDir": False,
+                    "size": 100,
+                },
+                {
+                    "name": "card.json",
+                    "uri": "viking://wiki/nodes/steam/card.json",
+                    "isDir": False,
+                    "size": 50,
+                },
+            ]
+        },
+    )
     service = FSService(viking_fs=viking_fs)
 
-    result = await service.ls("viking://wiki/nodes/steam", ctx=request_context)
+    result = await service.ls(
+        "viking://wiki/nodes/steam",
+        ctx=request_context,
+        output="original",
+    )
 
     assert [entry["uri"] for entry in result] == [
-        "viking://wiki/nodes/steam/documents",
-        "viking://wiki/nodes/steam_workshop",
+        "viking://wiki/nodes/steam/steam_workshop",
+        "viking://wiki/nodes/steam/sources",
+        "viking://wiki/nodes/steam/0001.md",
+        "viking://wiki/nodes/steam/card.json",
     ]
-    assert all(entry["isDir"] for entry in result)
-    assert "evidence.jsonl" not in {entry["name"] for entry in result}
-    assert "sources" not in {entry["name"] for entry in result}
+    assert all("/documents/" not in entry["uri"] for entry in result)
+    assert all("/children/" not in entry["uri"] for entry in result)
 
 
 def _wiki_context_files():

@@ -1,58 +1,46 @@
-"""Discover one Wiki layer through streaming candidate operations."""
+"""Discover one Wiki layer through a full-state tool-calling agent loop."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any
 
 from pydantic import ValidationError
 
 from .config import WikiConfig
-from .llm import WikiLLMRunner
-from .prompts import build_candidate_aggregation_prompt
+from .llm import WikiLLMRunner, _tool_response_payload
+from .prompts import build_node_aggregation_agent_prompt
 from .schemas import (
+    AddCardsToolArgs,
     AggregationCardView,
-    AssignCardsOperation,
-    CandidateMemberView,
-    CandidateOperationsResponse,
-    CandidateView,
-    CreateCandidateOperation,
+    AggregationNodeView,
+    CreateNodeToolArgs,
     DocumentCard,
-    MergeCandidatesOperation,
-    RenameCandidateOperation,
+    FinishLayerToolArgs,
+    MergeNodesToolArgs,
+    NodeCard,
+    RemoveCardsToolArgs,
+    RenameNodeToolArgs,
     SourceAssignmentItem,
     SourceAssignmentResponse,
-    SplitCandidateOperation,
-    UpdateScopeOperation,
+    SplitNodeToolArgs,
+    UpdateNodeScopeToolArgs,
     WikiNode,
 )
-from .uri import sanitize_node_id
 
 logger = logging.getLogger(__name__)
-MAX_VALIDATION_ATTEMPTS = 3
-T = TypeVar("T")
+MAX_CONSECUTIVE_NO_PROGRESS_TURNS = 3
 
 
 @dataclass
-class CandidateState:
-    candidate_id: str
+class AggregationNodeState:
+    node_id: str
     title: str
     scope: str
     card_ids: list[str]
-
-    @property
-    def status(self) -> str:
-        return "pending" if len(set(self.card_ids)) == 1 else "provisional"
-
-    def copy(self) -> "CandidateState":
-        return CandidateState(
-            candidate_id=self.candidate_id,
-            title=self.title,
-            scope=self.scope,
-            card_ids=list(self.card_ids),
-        )
 
 
 @dataclass(frozen=True)
@@ -62,317 +50,353 @@ class NodeDiscoveryResult:
 
 
 class NodeDiscoveryRunner:
+    """Run a stateful function-calling agent over one complete Wiki layer."""
+
     def __init__(self, llm: WikiLLMRunner, config: WikiConfig):
         self.llm = llm
         self.config = config
-        self._next_candidate_number = 1
+        self.aggregation_logs: list[dict[str, Any]] = []
 
     async def discover_layer(
         self,
-        cards: list[DocumentCard],
+        cards: list[DocumentCard | NodeCard],
         *,
         depth: int,
         reserved_node_ids: set[str] | None = None,
+        on_turn_complete: Callable[[dict], Awaitable[None]] | None = None,
     ) -> NodeDiscoveryResult:
-        """Aggregate one layer in sequential card batches and materialize viable nodes."""
         if not cards:
-            return NodeDiscoveryResult(
-                nodes=[],
-                source_assignments=SourceAssignmentResponse(assignments=[]),
-            )
-
+            return NodeDiscoveryResult([], SourceAssignmentResponse(assignments=[]))
         cards_by_id = {card.doc_id: card for card in cards}
         if len(cards_by_id) != len(cards):
             raise RuntimeError("current aggregation layer contains duplicate card IDs")
 
-        self._next_candidate_number = 1
-        candidates: dict[str, CandidateState] = {}
-        batch_size = max(1, self.config.limits.aggregation_batch_size)
-        total_batches = (len(cards) + batch_size - 1) // batch_size
-        for start in range(0, len(cards), batch_size):
-            batch = cards[start : start + batch_size]
-            prompt = build_candidate_aggregation_prompt(
-                self._candidate_views(candidates, cards_by_id),
-                [self._aggregation_card_view(card) for card in batch],
+        reserved_ids = set(reserved_node_ids or set())
+        nodes: dict[str, AggregationNodeState] = {}
+        tool_errors: list[str] = []
+        consecutive_no_progress = 0
+        max_turns = max(1, self.config.limits.aggregation_agent_max_turns)
+
+        for turn in range(1, max_turns + 1):
+            prompt = build_node_aggregation_agent_prompt(
+                self._node_views(nodes, cards_by_id),
+                self._unassigned_card_views(nodes, cards_by_id),
+                tool_errors,
             )
-            candidates = await _complete_with_validation_retry(
-                self.llm,
-                step="candidate_aggregation",
-                prompt=prompt,
-                schema=CandidateOperationsResponse.model_json_schema(),
-                validate=lambda result, current=candidates, current_batch=batch, final=(start + len(batch) == len(cards)): self._apply_batch_result(
-                    result,
-                    current,
-                    cards_by_id,
-                    current_batch,
-                    require_reduction=final,
-                ),
+            response = await self.llm.complete_tool_calls(
+                step="node_aggregation_agent", prompt=prompt, tools=_AGGREGATION_TOOLS
             )
+            state_before = self._state_summary(nodes, cards_by_id)
+            nodes_before = deepcopy(nodes)
+            turn_errors: list[str] = []
+            executed_calls: list[dict[str, Any]] = []
+            finished = False
+            if not response.tool_calls:
+                turn_errors.append(
+                    f"No structured tool calls were returned (finish_reason={response.finish_reason}). "
+                    "This does not finish the layer. Continue editing with function calls, "
+                    "or call finish_layer if no useful edit remains."
+                )
+
+            for call in response.tool_calls:
+                record = {"id": call.id, "name": call.name, "arguments": call.arguments}
+                try:
+                    if call.name == "finish_layer":
+                        FinishLayerToolArgs.model_validate(call.arguments)
+                        executed_calls.append(record)
+                        finished = True
+                        break
+                    self._execute_tool_call(
+                        call.name, call.arguments, nodes, cards_by_id, reserved_ids
+                    )
+                    executed_calls.append(record)
+                except (RuntimeError, ValidationError, ValueError) as exc:
+                    turn_errors.append(f"{call.name}: {exc}")
+
+            made_progress = nodes != nodes_before
+            consecutive_no_progress = (
+                0 if made_progress or finished else consecutive_no_progress + 1
+            )
+            if consecutive_no_progress:
+                turn_errors.append(
+                    f"No node state change for {consecutive_no_progress} consecutive turn(s); "
+                    f"the run fails after {MAX_CONSECUTIVE_NO_PROGRESS_TURNS}. "
+                    "Make a useful edit or explicitly call finish_layer."
+                )
+            log_record = {
+                "step": "node_aggregation_agent",
+                "depth": depth,
+                "turn": turn,
+                "finish_reason": response.finish_reason,
+                "tool_calls": executed_calls,
+                "tool_errors": turn_errors,
+                "state_before": state_before,
+                "state_after": self._state_summary(nodes, cards_by_id),
+                "finished": finished,
+                "made_progress": made_progress,
+                "consecutive_no_progress": consecutive_no_progress,
+                # Persist the returned text and all calls, including rejected calls,
+                # through the existing per-turn callback even if a later stage fails.
+                "response": _tool_response_payload(response),
+            }
+            self.aggregation_logs.append(log_record)
+            if on_turn_complete is not None:
+                await on_turn_complete(log_record)
             logger.info(
-                "[Wiki] Aggregated depth=%d batch=%d/%d cards=%d candidates=%d",
-                depth,
-                start // batch_size + 1,
-                total_batches,
-                len(batch),
-                len(candidates),
+                "[Wiki] Aggregation agent depth=%d turn=%d nodes=%d unassigned=%d calls=%d finished=%s",
+                depth, turn, len(nodes), len(self._unassigned_card_ids(nodes, cards_by_id)),
+                len(executed_calls), finished,
             )
+            if finished:
+                break
+            if consecutive_no_progress >= MAX_CONSECUTIVE_NO_PROGRESS_TURNS:
+                raise RuntimeError(
+                    f"aggregation agent made no progress for {consecutive_no_progress} "
+                    f"consecutive turns at depth={depth}; finish_layer was not called"
+                )
+            tool_errors = turn_errors
+        else:
+            raise RuntimeError(f"aggregation agent exceeded max turns ({max_turns}) at depth={depth}")
 
-        provisional = [candidate for candidate in candidates.values() if candidate.status == "provisional"]
-        if not provisional:
-            return NodeDiscoveryResult(
-                nodes=[],
-                source_assignments=SourceAssignmentResponse(assignments=[]),
-            )
-
-        nodes = self._build_nodes(
-            provisional,
-            depth,
-            reserved_node_ids=reserved_node_ids or set(),
+        materialized = self._split_oversized_nodes(
+            list(nodes.values()), depth=depth, reserved_node_ids=reserved_ids
         )
+        if not materialized:
+            return NodeDiscoveryResult([], SourceAssignmentResponse(assignments=[]))
+        wiki_nodes = self._build_nodes(materialized, depth, reserved_ids)
         assignments = [
             SourceAssignmentItem(
                 node_id=node.node_id,
-                source_ids=list(dict.fromkeys(candidate.card_ids)),
-                support_scope=candidate.scope,
+                source_ids=list(dict.fromkeys(state.card_ids)),
+                support_scope=state.scope,
             )
-            for node, candidate in zip(nodes, provisional, strict=True)
+            for node, state in zip(wiki_nodes, materialized, strict=True)
         ]
         return NodeDiscoveryResult(
-            nodes=nodes,
-            source_assignments=SourceAssignmentResponse(assignments=assignments),
+            nodes=wiki_nodes,
+            source_assignments=SourceAssignmentResponse(
+                assignments=assignments,
+                unassigned_source_ids=self._unassigned_card_ids(nodes, cards_by_id),
+            ),
         )
 
-    def _apply_batch_result(
+    def _execute_tool_call(
         self,
-        result: dict,
-        candidates: dict[str, CandidateState],
-        cards_by_id: dict[str, DocumentCard],
-        current_batch: list[DocumentCard],
+        name: str,
+        arguments: dict[str, Any],
+        nodes: dict[str, AggregationNodeState],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
+        reserved_ids: set[str],
+    ) -> None:
+        if name == "create_node":
+            args = CreateNodeToolArgs.model_validate(arguments)
+            if args.node_id in nodes or args.node_id in reserved_ids:
+                raise RuntimeError(f"node_id already exists or is reserved: {args.node_id}")
+            nodes[args.node_id] = AggregationNodeState(
+                args.node_id, args.title, args.scope,
+                self._valid_card_ids(args.card_ids, cards_by_id, minimum=2),
+            )
+            return
+        if name == "add_cards":
+            args = AddCardsToolArgs.model_validate(arguments)
+            node = self._node(nodes, args.node_id)
+            node.card_ids = list(dict.fromkeys([
+                *node.card_ids, *self._valid_card_ids(args.card_ids, cards_by_id)
+            ]))
+            return
+        if name == "remove_cards":
+            args = RemoveCardsToolArgs.model_validate(arguments)
+            node = self._node(nodes, args.node_id)
+            removed = set(self._valid_card_ids(args.card_ids, cards_by_id))
+            if not removed.issubset(node.card_ids):
+                raise RuntimeError("remove_cards may only remove cards assigned to the node")
+            remaining = [card_id for card_id in node.card_ids if card_id not in removed]
+            if len(remaining) < 2:
+                raise RuntimeError("remove_cards may not leave a directory node with fewer than two cards")
+            node.card_ids = remaining
+            return
+        if name == "merge_nodes":
+            args = MergeNodesToolArgs.model_validate(arguments)
+            target = self._node(nodes, args.target_node_id)
+            source_ids = list(dict.fromkeys(args.source_node_ids))
+            if args.target_node_id in source_ids:
+                raise RuntimeError("merge_nodes source_node_ids may not contain target_node_id")
+            source_nodes = [self._node(nodes, source_id) for source_id in source_ids]
+            merged_card_ids = list(dict.fromkeys([
+                *target.card_ids,
+                *(card_id for source in source_nodes for card_id in source.card_ids),
+            ]))
+            target.card_ids = merged_card_ids
+            for source_id in source_ids:
+                del nodes[source_id]
+            return
+        if name == "split_node":
+            args = SplitNodeToolArgs.model_validate(arguments)
+            original = self._node(nodes, args.node_id)
+            new_ids = [group.node_id for group in args.groups]
+            if len(set(new_ids)) != len(new_ids):
+                raise RuntimeError("split_node group node_ids must be unique")
+            if any(node_id in nodes and node_id != args.node_id for node_id in new_ids):
+                raise RuntimeError("split_node group node_id already exists")
+            if any(node_id in reserved_ids for node_id in new_ids):
+                raise RuntimeError("split_node group node_id is reserved")
+            original_ids = set(original.card_ids)
+            groups: list[AggregationNodeState] = []
+            covered: set[str] = set()
+            for group in args.groups:
+                card_ids = self._valid_card_ids(group.card_ids, cards_by_id, minimum=2)
+                if not set(card_ids).issubset(original_ids):
+                    raise RuntimeError("split_node groups may only contain cards from the original node")
+                covered.update(card_ids)
+                groups.append(AggregationNodeState(group.node_id, group.title, group.scope, card_ids))
+            if covered != original_ids:
+                raise RuntimeError("split_node must preserve every original card")
+            del nodes[args.node_id]
+            nodes.update({group.node_id: group for group in groups})
+            return
+        if name == "rename_node":
+            args = RenameNodeToolArgs.model_validate(arguments)
+            self._node(nodes, args.node_id).title = args.title
+            return
+        if name == "update_node_scope":
+            args = UpdateNodeScopeToolArgs.model_validate(arguments)
+            self._node(nodes, args.node_id).scope = args.scope
+            return
+        raise RuntimeError(f"unsupported aggregation tool: {name}")
+
+    @staticmethod
+    def _node(nodes: dict[str, AggregationNodeState], node_id: str) -> AggregationNodeState:
+        node = nodes.get(node_id)
+        if node is None:
+            raise RuntimeError(f"tool references unknown node: {node_id}")
+        return node
+
+    @staticmethod
+    def _valid_card_ids(
+        card_ids: list[str],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
         *,
-        require_reduction: bool = False,
-    ) -> dict[str, CandidateState]:
-        response = CandidateOperationsResponse.model_validate(result)
-        working = {candidate_id: candidate.copy() for candidate_id, candidate in candidates.items()}
-        local_refs: dict[str, str] = {}
+        minimum: int = 1,
+    ) -> list[str]:
+        unique_ids = list(dict.fromkeys(card_ids))
+        unknown = [card_id for card_id in unique_ids if card_id not in cards_by_id]
+        if unknown:
+            raise RuntimeError(f"tool references unknown card IDs: {unknown}")
+        if len(unique_ids) < minimum:
+            raise RuntimeError(f"operation requires at least {minimum} distinct cards")
+        return unique_ids
 
-        def resolve_candidate_id(reference: str) -> str:
-            if reference in working:
-                return reference
-            candidate_id = local_refs.get(reference)
-            if candidate_id and candidate_id in working:
-                return candidate_id
-            raise RuntimeError(f"operation references unknown candidate: {reference}")
-
-        def validate_card_ids(card_ids: list[str]) -> list[str]:
-            unique_ids = list(dict.fromkeys(card_ids))
-            unknown = [card_id for card_id in unique_ids if card_id not in cards_by_id]
-            if unknown:
-                raise RuntimeError(f"operation references unknown card IDs: {unknown}")
-            return unique_ids
-
-        def register_ref(candidate_ref: str, candidate_id: str) -> None:
-            if candidate_ref in local_refs or candidate_ref in working or candidate_ref == candidate_id:
-                raise RuntimeError(f"duplicate or ambiguous candidate_ref: {candidate_ref}")
-            local_refs[candidate_ref] = candidate_id
-
-        for operation in response.operations:
-            if isinstance(operation, CreateCandidateOperation):
-                card_ids = validate_card_ids(operation.card_ids)
-                candidate_id = self._new_candidate_id(working)
-                register_ref(operation.candidate_ref, candidate_id)
-                working[candidate_id] = CandidateState(
-                    candidate_id=candidate_id,
-                    title=operation.title,
-                    scope=operation.scope,
-                    card_ids=card_ids,
-                )
+    def _split_oversized_nodes(
+        self,
+        nodes: list[AggregationNodeState],
+        *,
+        depth: int,
+        reserved_node_ids: set[str],
+    ) -> list[AggregationNodeState]:
+        chunk_size = max(1, int(self.config.limits.max_cards_per_node))
+        split: list[AggregationNodeState] = []
+        used_ids = {*reserved_node_ids, *(node.node_id for node in nodes)}
+        for node in nodes:
+            card_ids = list(dict.fromkeys(node.card_ids))
+            if len(card_ids) <= chunk_size:
+                split.append(node)
                 continue
-
-            if isinstance(operation, AssignCardsOperation):
-                candidate_id = resolve_candidate_id(operation.candidate_id)
-                card_ids = validate_card_ids(operation.card_ids)
-                candidate = working[candidate_id]
-                candidate.card_ids = list(dict.fromkeys([*candidate.card_ids, *card_ids]))
-                continue
-
-            if isinstance(operation, RenameCandidateOperation):
-                candidate_id = resolve_candidate_id(operation.candidate_id)
-                working[candidate_id].title = operation.title
-                continue
-
-            if isinstance(operation, UpdateScopeOperation):
-                candidate_id = resolve_candidate_id(operation.candidate_id)
-                working[candidate_id].scope = operation.scope
-                continue
-
-            if isinstance(operation, MergeCandidatesOperation):
-                target_id = resolve_candidate_id(operation.target_candidate_id)
-                source_ids = [resolve_candidate_id(item) for item in operation.source_candidate_ids]
-                if target_id in source_ids or len(set(source_ids)) != len(source_ids):
-                    raise RuntimeError("merge_candidates requires distinct source and target candidates")
-                target = working[target_id]
-                merged_ids = list(target.card_ids)
-                for source_id in source_ids:
-                    merged_ids.extend(working[source_id].card_ids)
-                target.card_ids = list(dict.fromkeys(merged_ids))
-                for source_id in source_ids:
-                    del working[source_id]
-                continue
-
-            if isinstance(operation, SplitCandidateOperation):
-                candidate_id = resolve_candidate_id(operation.candidate_id)
-                original_ids = set(working[candidate_id].card_ids)
-                group_refs = [group.candidate_ref for group in operation.groups]
-                if len(set(group_refs)) != len(group_refs):
-                    raise RuntimeError("split_candidate group candidate_ref values must be unique")
-
-                pending_groups: list[tuple[str, CandidateState]] = []
-                covered_ids: set[str] = set()
-                for group in operation.groups:
-                    group_ids = validate_card_ids(group.card_ids)
-                    if not set(group_ids).issubset(original_ids):
-                        raise RuntimeError("split_candidate groups may only contain original candidate cards")
-                    covered_ids.update(group_ids)
-                    occupied = {**working, **{state.candidate_id: state for _, state in pending_groups}}
-                    new_id = self._new_candidate_id(occupied)
-                    pending_groups.append(
-                        (
-                            group.candidate_ref,
-                            CandidateState(
-                                candidate_id=new_id,
-                                title=group.title,
-                                scope=group.scope,
-                                card_ids=group_ids,
-                            ),
-                        )
-                    )
-                if covered_ids != original_ids:
-                    raise RuntimeError("split_candidate must preserve every original card")
-
-                del working[candidate_id]
-                for candidate_ref, state in pending_groups:
-                    register_ref(candidate_ref, state.candidate_id)
-                    working[state.candidate_id] = state
-                continue
-
-            raise RuntimeError(f"unsupported candidate operation: {operation.op}")
-
-        assigned_ids = {
-            card_id
-            for candidate in working.values()
-            for card_id in candidate.card_ids
-        }
-        for card in current_batch:
-            if card.doc_id in assigned_ids:
-                continue
-            candidate_id = self._new_candidate_id(working)
-            working[candidate_id] = CandidateState(
-                candidate_id=candidate_id,
-                title=card.title,
-                scope=f"Knowledge specifically covered by {card.title}.",
-                card_ids=[card.doc_id],
-            )
-        if require_reduction:
-            provisional_count = sum(
-                candidate.status == "provisional" for candidate in working.values()
-            )
-            if provisional_count >= len(cards_by_id):
-                raise RuntimeError(
-                    "aggregation must reduce the number of provisional candidates below the input card count"
-                )
-        return working
-
-    def _new_candidate_id(self, candidates: dict[str, CandidateState]) -> str:
-        while True:
-            candidate_id = f"candidate_{self._next_candidate_number:04d}"
-            self._next_candidate_number += 1
-            if candidate_id not in candidates:
-                return candidate_id
-
-    @staticmethod
-    def _aggregation_card_view(card: DocumentCard) -> AggregationCardView:
-        return AggregationCardView(
-            card_id=card.doc_id,
-            title=card.title,
-            summary=card.summary,
-            main_points=card.main_points,
-            important_terms=card.important_terms,
-            candidate_topics=card.candidate_topics,
-        )
-
-    @staticmethod
-    def _candidate_views(
-        candidates: dict[str, CandidateState],
-        cards_by_id: dict[str, DocumentCard],
-    ) -> list[CandidateView]:
-        return [
-            CandidateView(
-                candidate_id=candidate.candidate_id,
-                title=candidate.title,
-                scope=candidate.scope,
-                cards=[
-                    CandidateMemberView(card_id=card_id, summary=cards_by_id[card_id].summary)
-                    for card_id in candidate.card_ids
-                ],
-                status=candidate.status,
-            )
-            for candidate in candidates.values()
-        ]
+            step, cursor, part = max(1, chunk_size - 1), 0, 1
+            while cursor < len(card_ids):
+                chunk = card_ids[cursor : cursor + chunk_size]
+                node_id = f"{node.node_id}_d{depth}_{part}"
+                while node_id in used_ids:
+                    part += 1
+                    node_id = f"{node.node_id}_d{depth}_{part}"
+                used_ids.add(node_id)
+                split.append(AggregationNodeState(node_id, f"{node.title}_{part}", node.scope, chunk))
+                if cursor + chunk_size >= len(card_ids):
+                    break
+                cursor += step
+                part += 1
+        return split
 
     @staticmethod
     def _build_nodes(
-        candidates: list[CandidateState],
-        depth: int,
-        *,
-        reserved_node_ids: set[str],
+        states: list[AggregationNodeState], depth: int, reserved_node_ids: set[str]
     ) -> list[WikiNode]:
-        used_ids = set(reserved_node_ids)
+        used = set(reserved_node_ids)
         nodes: list[WikiNode] = []
-        for candidate in candidates:
-            base_id = sanitize_node_id(candidate.title)
-            node_id = base_id
-            suffix = 2
-            while node_id in used_ids:
-                node_id = f"{base_id}_{suffix}"
-                suffix += 1
-            used_ids.add(node_id)
-            nodes.append(
-                WikiNode(
-                    node_id=node_id,
-                    title=candidate.title,
-                    depth=depth,
-                    scope=candidate.scope,
-                )
-            )
+        for state in states:
+            if state.node_id in used:
+                raise RuntimeError(f"materialized node_id is reserved: {state.node_id}")
+            used.add(state.node_id)
+            nodes.append(WikiNode(node_id=state.node_id, title=state.title, depth=depth, scope=state.scope))
         return nodes
 
+    @staticmethod
+    def _card_view(card: DocumentCard | NodeCard) -> AggregationCardView:
+        common = {
+            "card_id": card.doc_id,
+            "title": card.title,
+            "summary": card.summary,
+        }
+        if isinstance(card, NodeCard):
+            return AggregationCardView(**common, scope=card.scope)
+        return AggregationCardView(**common, candidate_topics=card.candidate_topics)
 
-async def _complete_with_validation_retry(
-    llm: WikiLLMRunner,
-    *,
-    step: str,
-    prompt: str,
-    schema: dict,
-    validate: Callable[[dict], T],
-) -> T:
-    last_error: Exception | None = None
-    for attempt in range(1, MAX_VALIDATION_ATTEMPTS + 1):
-        try:
-            result = await llm.complete_json(
-                step=step,
-                prompt=prompt,
-                schema=schema,
-            )
-            return validate(result)
-        except (RuntimeError, ValidationError) as exc:
-            last_error = exc
-            if attempt == MAX_VALIDATION_ATTEMPTS:
-                break
-            logger.info(
-                "[Wiki] Retrying %s after validation failure attempt=%d/%d",
-                step,
-                attempt,
-                MAX_VALIDATION_ATTEMPTS,
-            )
-    assert last_error is not None
-    raise last_error
+    def _node_views(
+        self,
+        nodes: dict[str, AggregationNodeState],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
+    ) -> list[dict]:
+        return [
+            AggregationNodeView(
+                node_id=node.node_id, title=node.title, scope=node.scope,
+                cards=[self._card_view(cards_by_id[card_id]) for card_id in node.card_ids],
+            ).model_dump(mode="json", exclude_none=True)
+            for node in nodes.values()
+        ]
+
+    def _unassigned_card_views(
+        self,
+        nodes: dict[str, AggregationNodeState],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
+    ) -> list[AggregationCardView]:
+        return [self._card_view(cards_by_id[card_id]) for card_id in self._unassigned_card_ids(nodes, cards_by_id)]
+
+    @staticmethod
+    def _unassigned_card_ids(
+        nodes: dict[str, AggregationNodeState],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
+    ) -> list[str]:
+        assigned = {card_id for node in nodes.values() for card_id in node.card_ids}
+        return [card_id for card_id in cards_by_id if card_id not in assigned]
+
+    def _state_summary(
+        self,
+        nodes: dict[str, AggregationNodeState],
+        cards_by_id: dict[str, DocumentCard | NodeCard],
+    ) -> dict[str, Any]:
+        return {
+            "node_ids": list(nodes), "node_count": len(nodes),
+            "unassigned_card_ids": self._unassigned_card_ids(nodes, cards_by_id),
+        }
+
+
+def _tool(name: str, description: str, model: type) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": model.model_json_schema(),
+        },
+    }
+
+
+_AGGREGATION_TOOLS = [
+    _tool("create_node", "Create a coherent directory node from two or more cards.", CreateNodeToolArgs),
+    _tool("add_cards", "Add cards to an existing directory node; this may create DAG overlap.", AddCardsToolArgs),
+    _tool("remove_cards", "Remove cards while keeping at least two in the node.", RemoveCardsToolArgs),
+    _tool("merge_nodes", "Merge existing directory nodes into the target node.", MergeNodesToolArgs),
+    _tool("split_node", "Replace one mixed directory node with coherent nodes.", SplitNodeToolArgs),
+    _tool("rename_node", "Rename an existing directory node.", RenameNodeToolArgs),
+    _tool("update_node_scope", "Update an existing directory node scope.", UpdateNodeScopeToolArgs),
+    _tool("finish_layer", "Finish the aggregation layer after all useful edits are complete.", FinishLayerToolArgs),
+]

@@ -64,6 +64,7 @@ class ContentWriteCoordinator:
         *,
         uri: str,
         content: str,
+        abstract: Optional[str] = None,
         ctx: RequestContext,
         mode: str = "replace",
         wait: bool = False,
@@ -81,6 +82,7 @@ class ContentWriteCoordinator:
             return await self._create_and_write(
                 uri=normalized_uri,
                 content=content,
+                abstract=abstract,
                 ctx=ctx,
                 wait=wait,
                 timeout=timeout,
@@ -112,6 +114,7 @@ class ContentWriteCoordinator:
             uri=normalized_uri,
             root_uri=root_uri,
             content=content,
+            abstract=abstract,
             mode=mode,
             context_type=context_type,
             wait=wait,
@@ -243,6 +246,7 @@ class ContentWriteCoordinator:
         uri: str,
         root_uri: str,
         content: str,
+        abstract: Optional[str] = None,
         mode: str,
         context_type: str,
         wait: bool,
@@ -284,6 +288,7 @@ class ContentWriteCoordinator:
                 vector_status = await self._maybe_enqueue_wiki_document_embedding(
                     uri=uri,
                     content=content,
+                    abstract=abstract,
                     ctx=ctx,
                     telemetry_id=telemetry_id,
                 )
@@ -431,12 +436,15 @@ class ContentWriteCoordinator:
 
     def _is_wiki_node_document_uri(self, uri: str) -> bool:
         parts = uri_parts(uri)
+        filename = parts[-1] if parts else ""
         return (
-            len(parts) == 5
+            len(parts) >= 4
             and parts[0] == "wiki"
             and parts[1] == "nodes"
-            and parts[3] == "documents"
-            and parts[4].endswith(".md")
+            and len(filename) == 7
+            and filename[:4].isdigit()
+            and filename.endswith(".md")
+            and "sources" not in parts[2:-1]
         )
 
     async def _maybe_enqueue_wiki_document_embedding(
@@ -444,6 +452,7 @@ class ContentWriteCoordinator:
         *,
         uri: str,
         content: str,
+        abstract: Optional[str],
         ctx: RequestContext,
         telemetry_id: str,
     ) -> str:
@@ -458,11 +467,12 @@ class ContentWriteCoordinator:
 
         parent = VikingURI(uri).parent
         parent_uri = parent.uri if parent is not None else None
+        search_abstract = content if abstract is None else abstract.strip()
         context = Context(
             uri=uri,
             parent_uri=parent_uri,
             is_leaf=True,
-            abstract=content,
+            abstract=search_abstract,
             context_type="resource",
             category="wiki",
             level=ContextLevel.DETAIL,
@@ -500,6 +510,7 @@ class ContentWriteCoordinator:
         *,
         uri: str,
         content: str,
+        abstract: Optional[str],
         ctx: RequestContext,
         wait: bool,
         timeout: Optional[float],
@@ -534,6 +545,7 @@ class ContentWriteCoordinator:
             uri=uri,
             root_uri=root_uri,
             content=content,
+            abstract=abstract,
             mode="create",
             context_type=context_type,
             wait=wait,

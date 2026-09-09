@@ -71,9 +71,13 @@
 
 `ResourceDocument` 表示已经加载好内容的来源文档。它同时服务两个后续阶段：`content_or_structure` 是给 `cards.py` 生成 Document Card 用的文本输入；`source_sections` 是给节点正文生成用的结构化来源片段。底层节点的 `ResourceDocument` 来自原始资源；更高层节点的 `ResourceDocument` 由下层节点正文临时转换而来。
 
-`DocumentCardContent` 表示 LLM 需要返回的 card 内容。它只包含语义信息，例如文档总结、主要观点、重要术语、候选 Wiki 主题；不包含 `doc_id`、`resource_uri`、`title` 这类系统已经知道的字段。
+`DocumentCardContent` 表示 LLM 为原始文档返回的 card 内容，只包含 `summary` 和
+`candidate_topics`；不包含 `doc_id`、`resource_uri`、`title` 这类系统已经知道的字段。
 
-`DocumentCard` 是最终的完整来源卡片。它在 `DocumentCardContent` 的基础上补上 `doc_id`、`resource_uri`、`title` 和 `markdown`。它既可以表示原始文档，也可以表示一个已经生成好的 Wiki node。后续节点发现和来源分配都基于同一类 card 继续处理。
+`DocumentCard` 只表示原始文档。`NodeCardContent` 只让模型生成节点 `summary`；
+`NodeCard` 再由代码补上节点的 `scope`、标识和路径，不包含 `candidate_topics`。
+节点发现统一接收这两类 card，但底层读取原始文档的候选主题，更高层直接读取下层
+节点的 scope。
 
 #### 1.4 WikiNode 和节点发现相关对象
 
@@ -81,7 +85,9 @@
 
 `WikiNode` 表示最终 Wiki 图上的一个主题节点。它包含节点 ID、标题、层级、覆盖范围，以及父子节点关系。`node_id` 会进入节点目录路径，所以必须是稳定且路径安全的字符串。
 
-`scope` 是节点的权威边界，长期保存在 `nodes.json`。它不迁移到 card，也不被 card 的 `summary` 替代；节点正文生成时继续使用 `scope` 作为 include/exclude 约束。
+`scope` 是节点的权威边界，长期保存在 `nodes.json`，也由代码直接写入 node card，
+供更高层聚合和节点正文向量摘要使用。它不被 card 的 `summary` 替代；node card 的
+`summary` 只是对正文实际覆盖知识的更具体描述。
 
 父子关系不是严格树，而是 DAG。`parent_node_ids` 是列表，允许同一个节点属于多个更高层节点；`child_node_ids` 记录当前节点覆盖的下层节点。
 
@@ -97,7 +103,9 @@
 
 对应代码：`openviking/wiki/schemas.py#L141-L170`
 
-`SourceRef` 表示生成某个 Wiki 节点正文时可以参考的一个来源。来源可能是原始文档，也可能是已经生成好的下层 Wiki 节点。两者都先以 `DocumentCard` 参与节点发现，再转换成 `SourceRef`。
+`SourceRef` 表示生成某个 Wiki 节点正文时可以参考的一个来源。来源可能是原始文档，
+也可能是已经生成好的下层 Wiki 节点。前者以 `DocumentCard`、后者以 `NodeCard`
+参与节点发现，再统一转换成 `SourceRef`。
 
 `support_scope` 说明这个来源支撑当前节点的哪部分范围；`matched_topics` 记录匹配到的主题信息。它们不是新的推理结果，主要是把前面已有的节点范围和候选主题带到来源记录里，方便后续生成正文时使用。
 
@@ -110,7 +118,7 @@
 
 对应代码：`openviking/wiki/schemas.py#L173-L213`
 
-`NodeDocumentsResponse` 表示 LLM 生成的节点正文列表。真正的综合知识内容会写入 `nodes/<node_id>/documents/*.md`。
+`NodeDocumentsResponse` 表示 LLM 生成的节点正文列表。真正的综合知识内容会直接写入节点目录下的 `0001.md`、`0002.md` 等文件。
 
 `NodeDocumentContent` 是 LLM 返回的单篇正文内容，只包含标题和正文；`NodeDocument` 是代码补上 `document_id` 后的完整对象，用来决定最终写成 `0001.md`、`0002.md` 这类文件。
 
@@ -142,7 +150,7 @@
 
 `sanitize_node_id` 会把节点标题转换成适合放进路径里的节点 ID。例如 `Question Answering` 会变成 `question_answering`。这样生成的节点目录可以稳定写到 `viking://wiki/nodes/<node_id>/`。
 
-其他函数负责拼接固定产物路径，例如原始文档 cards 目录、节点目录、`nodes/<node_id>/card.md`、`nodes/<node_id>/card.json`、`documents/0001.md`、`sources/` 和 `run/`。简单说，这个文件定义了 Wiki 产物在 `viking://wiki/` 下的目录布局。
+其他函数负责拼接固定产物路径，例如原始文档 cards 目录、节点目录、`nodes/<node_id>/card.md`、`nodes/<node_id>/card.json`、节点下的 `0001.md`、`sources/` 和 `run/`。简单说，这个文件定义了 Wiki 产物在 `viking://wiki/` 下的目录布局。
 
 ## 4. `openviking/wiki/writer.py`
 
@@ -154,7 +162,7 @@
 
 #### 4.1 写入方法
 
-`ensure_dirs` 用来创建 Wiki 根目录、cards 目录、nodes 目录、run 目录，以及具体节点的 documents/sources 目录。
+`ensure_dirs` 用来创建 Wiki 根目录、cards 目录、nodes 目录、run 目录，以及具体节点和 sources 目录。
 
 `write_text` 写普通文本；如果目标文件已经存在，就改为覆盖写入。`write_json` 和 `write_jsonl` 分别用于写 JSON 文件和 JSON Lines 日志文件。
 
@@ -204,11 +212,15 @@
 
 `build_document_card_prompt` 只给模型看文档内容和少量 card 生成相关 metadata，不传 `doc_id`、`resource_uri`、`title` 这些标识字段。
 
-`build_node_discovery_prompt` 只给模型看每个来源 card 的 `source_id`、`title`、`summary` 和 `candidate_topics`，用来聚合当前层节点，不传全文。底层来源 card 来自原始文档；更高层来源 card 来自下层 node。
+节点聚合 prompt 不传全文。原始文档 card 提供 `card_id/title/summary/candidate_topics`；
+更高层 node card 提供 `card_id/title/summary/scope`。聚合器把候选主题或 scope 当作
+路由提示，并用 summary 检查实际凝聚性。
 
 `build_node_documents_prompt` 传节点边界和来源片段，用来生成节点正文。来源片段可能来自原始文档，也可能来自下层 node documents；prompt 统一要求按知识综合，不按来源逐段总结。
 
-`build_node_card_prompt` 在节点正文生成后调用。它传 `WikiNode.title/scope` 和当前节点的 `documents/*.md`，生成 node card 的 `summary/main_points/important_terms/candidate_topics`。这里 `scope` 只作为理解正文的边界，不作为 card 字段输出。
+`build_node_card_prompt` 在节点正文生成后调用。它传 `WikiNode.title/scope` 和当前节点
+正文，只让模型生成比 scope 更具体的 `summary`。`scope` 由代码直接写入 node card，
+不再让模型生成 `candidate_topics`，也不根据父目录或叶子目录切换 card 任务。
 
 `build_next_layer_decision_prompt` 传当前层已经生成好的节点信息，用来判断是否还需要继续向上聚合。
 
@@ -278,7 +290,8 @@
 
 ### 文件定位
 
-`cards.py` 负责生成 Document Card。它接收已经加载好内容的 `ResourceDocument`，调用 LLM 提炼出文档摘要、要点、重要术语和候选 Wiki 主题，最后组装成完整的 `DocumentCard`。
+`cards.py` 负责生成两类 card。原始 `ResourceDocument` 生成带候选主题的
+`DocumentCard`；Wiki 节点正文生成只带 summary、由代码补入 scope 的 `NodeCard`。
 
 这个文件不负责读取资源内容。资源内容已经由 `content_loader.py` 准备好，并放在 `ResourceDocument.content_or_structure` 里。
 
@@ -292,13 +305,16 @@
 
 单篇文档生成时，代码会先根据 `ResourceDocument` 构造 prompt，然后让 LLM 按 `DocumentCardContent` 返回结构化 JSON。返回结果会经过 Pydantic 校验；如果模型没有返回可解析 JSON，或者字段不符合要求，最多会重试 3 次。
 
-LLM 只负责生成文档的语义内容，例如 `summary`、`main_points`、`important_terms` 和 `candidate_topics`。`doc_id`、`resource_uri`、`title` 这些系统已经知道的字段由代码自己补上，避免模型编造文档标识。
+原始文档 card 的 LLM 输出包含 `summary` 和 `candidate_topics`；node card 的 LLM 输出
+只包含 `summary`。`doc_id`、`resource_uri`、`title` 以及 node card 的 `scope` 由代码补上。
 
 #### 9.2 Markdown 输出
 
-`render_card_markdown` 会把结构化的 `DocumentCard` 转成一段可读 Markdown，包含来源信息、摘要、主要观点、重要术语和候选 Wiki 主题。
+`render_card_markdown` 会把结构化 card 转成可读 Markdown。原始文档版本包含摘要和
+候选主题；node card 版本包含 scope 和摘要。
 
-pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 `.card.json`，后续节点发现和来源分配主要读取 card 里的 `summary`、`candidate_topics`、`doc_id` 等结构化字段。
+pipeline 会把 card 同时写成 Markdown 和 JSON。原始文档 card 保留候选主题；node card
+的 Markdown/JSON 改为展示 scope 和 summary，供下一层发现和来源引用。
 
 ## 10. `openviking/wiki/nodes.py`
 
@@ -312,7 +328,8 @@ pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 
 
 `NodeDiscoveryRunner` 是节点发现的主类。它持有 `WikiLLMRunner` 和 `WikiConfig`，分别用于调用模型和读取过滤阈值。
 
-`discover_layer` 是统一入口。它接收一组 `DocumentCard`，构造节点发现 prompt，让模型根据 card 的摘要和候选主题归纳 Wiki 节点。模型返回节点标题、范围说明，以及每个节点关联的 `supporting_source_ids`。
+`discover_layer` 是统一入口。它接收原始 `DocumentCard` 或 `NodeCard`，让模型根据
+summary 以及候选主题或 scope 归纳 Wiki 节点。
 
 底层和更高层的区别只体现在输入 card 的来源：底层输入是原始文档 card，更高层输入是上一层生成出来的 node card。返回结果都是一组 `WikiNode` 和一份 `SourceAssignmentResponse`。
 
@@ -340,7 +357,8 @@ pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 
 
 `SourceRefBuilder` 是这个文件的主类。它持有 `WikiConfig`，用于拼出 card、node 等产物路径。
 
-`build_refs_by_node` 是统一入口。输入是 `nodes.py` 生成的 `SourceAssignmentItem` 和当前层所有来源 `DocumentCard`，输出是按节点分组的 `SourceRef`。
+`build_refs_by_node` 是统一入口。输入是 `nodes.py` 生成的 `SourceAssignmentItem` 和
+当前层所有原始 `DocumentCard` 或 `NodeCard`，输出是按节点分组的 `SourceRef`。
 
 如果 card 的 `resource_uri` 指向 `viking://wiki/...`，生成的 `SourceRef.ref_type` 是 `wiki_node`，`card_uri` 指向 `nodes/<node_id>/card.md`；否则 `ref_type` 是 `document`，`card_uri` 指向全局 `cards/<doc_id>.card.md`。
 
@@ -354,7 +372,7 @@ pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 
 
 ### 文件定位
 
-`documents.py` 负责生成节点正文 `documents/*.md`。
+`documents.py` 负责生成节点目录下的编号正文文件。
 
 
 ### 阅读记录
@@ -367,9 +385,9 @@ pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 
 
 #### 12.2 结果校验和编号
 
-`_parse_node_documents_result` 处理模型返回的节点正文。模型只返回每篇正文的标题和内容，代码会交给 `_build_node_documents` 补上 `document_id`，这样后续才能写成 `documents/0001.md`、`documents/0002.md`。如果模型没有返回任何正文，会报错触发重试。
+`_parse_node_documents_result` 处理模型返回的节点正文。模型只返回每篇正文的标题和内容，代码会交给 `_build_node_documents` 补上 `document_id`，这样后续才能直接写成 `0001.md`、`0002.md`。如果模型没有返回任何正文，会报错触发重试。
 
-`_build_node_documents` 会给每篇正文补上稳定的 `document_id`，格式是 `0001`、`0002` 这种编号。后续 pipeline 会用这个编号写出 `documents/0001.md` 等文件。
+`_build_node_documents` 会给每篇正文补上稳定的 `document_id`，格式是 `0001`、`0002` 这种编号。后续 pipeline 会用这个编号在节点目录下写出 `0001.md` 等文件。
 
 `_complete_with_validation_retry` 是通用重试逻辑。模型返回格式不对、内容为空或校验失败时，最多重试 3 次。
 
@@ -443,12 +461,15 @@ pipeline 会把这份 Markdown 写成 `.card.md` 文件；同时也会写一份 
 
 ```text
 sources/*.ref.json
-documents/*.md
+0001.md / 0002.md
 card.md / card.json
 GeneratedNodeContext
 ```
 
-节点正文统一使用 `ResourceDocument.source_sections`。底层节点的 `ResourceDocument` 来自原始文档；更高层节点的 `ResourceDocument` 由下层节点正文转换而来。正文生成完成后，再基于 `WikiNode.title/scope` 和 `documents/*.md` 生成 node card，写入 `nodes/<node_id>/card.md` 和 `card.json`。
+节点正文统一使用 `ResourceDocument.source_sections`。底层节点的 `ResourceDocument`
+来自原始文档；更高层节点的 `ResourceDocument` 由下层节点正文转换而来。正文生成
+完成后，再基于 `WikiNode.title/scope` 和编号正文生成 node card summary；代码写入
+节点 scope 后保存为 `card.md` 和 `card.json`。
 
 #### 14.4 主流程里的数据整理
 
@@ -593,14 +614,14 @@ Wiki 生成后的主要文件和关键类关系如下：
 
 | 文件 | 对应对象 | 作用 |
 | --- | --- | --- |
-| `cards/<doc_id>.card.json` | `DocumentCard` | 一篇原始文档的结构化卡片，包含摘要、要点、候选主题和文档标识。 |
+| `cards/<doc_id>.card.json` | `DocumentCard` | 一篇原始文档的结构化卡片，包含摘要、候选主题和文档标识。 |
 | `cards/<doc_id>.card.md` | `DocumentCard.markdown` | 同一张 card 的 Markdown 展示版本，方便人工查看。 |
 | `nodes.json` | `list[WikiNode]` | 全部 Wiki 节点索引，包括 active 和 rejected 节点。 |
 | `source_assignments.json` | `SourceAssignmentResult` | 每个节点绑定到哪些来源，以及有哪些来源未分配。 |
 | `nodes/<node_id>/sources/*.ref.json` | `SourceRef` | 单个节点的来源记录。来源可能是原始文档，也可能是下层 node。 |
-| `nodes/<node_id>/card.json` | `DocumentCard` | 节点的结构化 card，供更高层节点发现使用。 |
-| `nodes/<node_id>/card.md` | `DocumentCard.markdown` | 节点 card 的 Markdown 展示版本，替代旧 `node.md`。 |
-| `nodes/<node_id>/documents/0001.md` | `NodeDocument.content` | 节点正文，是模型基于来源综合生成的知识内容。 |
+| `nodes/<node_id>/card.json` | `NodeCard` | 节点的 `summary + scope` card，不包含候选主题，供更高层节点发现使用。 |
+| `nodes/<node_id>/card.md` | `NodeCard.markdown` | 节点 scope 和 summary 的 Markdown 展示版本。 |
+| `nodes/<node_id>/0001.md` | `NodeDocument.content` | 节点正文，是模型基于来源综合生成且进入检索索引的知识内容。 |
 | `run/config.json` | `WikiConfig` | 本次运行使用的配置，包括模型配置和生成限制。 |
 | `run/prompts.jsonl` | `WikiLLMRunner` 日志 | 每次 LLM 调用的 prompt 记录。 |
 | `run/raw_outputs.jsonl` | `WikiLLMRunner` 日志 | 每次 LLM 调用的原始结构化输出。 |
@@ -634,7 +655,7 @@ biomedical_natural_language_processing_applications
 ```text
 nodes/biomedical_natural_language_processing_applications/card.md
 nodes/biomedical_natural_language_processing_applications/card.json
-nodes/biomedical_natural_language_processing_applications/documents/0001.md
+nodes/biomedical_natural_language_processing_applications/0001.md
 nodes/biomedical_natural_language_processing_applications/sources/*.ref.json
 ```
 

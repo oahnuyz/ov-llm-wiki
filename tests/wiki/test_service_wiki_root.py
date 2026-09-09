@@ -15,7 +15,16 @@ async def test_service_wiki_build_uses_stable_wiki_root(monkeypatch):
             captured["writer"] = writer
             captured["config"] = config
 
-        async def run_from_inputs(self, wiki_inputs, *, content_loader, card_input_mode, max_card_input_chars):
+        async def run_from_inputs(
+            self,
+            wiki_inputs,
+            *,
+            content_loader,
+            card_input_mode,
+            max_card_input_chars,
+            build_stage,
+        ):
+            captured["build_stage"] = build_stage
             return SimpleNamespace(cards=[], nodes=[], node_contexts=[])
 
     monkeypatch.setattr(
@@ -44,6 +53,7 @@ async def test_service_wiki_build_uses_stable_wiki_root(monkeypatch):
 
     assert captured["config"].wiki_root_uri == "viking://wiki/"
     assert captured["config"].resource_root_uri == "viking://resources/qasper_30_processed_docs_42020d17"
+    assert captured["build_stage"] == "all"
     assert result["wiki_root_uri"] == "viking://wiki/"
 
 
@@ -57,8 +67,17 @@ async def test_service_wiki_build_expands_document_manifest(monkeypatch):
             captured["writer"] = writer
             captured["config"] = config
 
-        async def run_from_inputs(self, wiki_inputs, *, content_loader, card_input_mode, max_card_input_chars):
+        async def run_from_inputs(
+            self,
+            wiki_inputs,
+            *,
+            content_loader,
+            card_input_mode,
+            max_card_input_chars,
+            build_stage,
+        ):
             captured["wiki_inputs"] = wiki_inputs
+            captured["build_stage"] = build_stage
             return SimpleNamespace(cards=[], nodes=[], node_contexts=[])
 
     monkeypatch.setattr(
@@ -115,7 +134,15 @@ async def test_service_wiki_build_allows_missing_vlm_config(monkeypatch):
             captured["writer"] = writer
             captured["config"] = config
 
-        async def run_from_inputs(self, wiki_inputs, *, content_loader, card_input_mode, max_card_input_chars):
+        async def run_from_inputs(
+            self,
+            wiki_inputs,
+            *,
+            content_loader,
+            card_input_mode,
+            max_card_input_chars,
+            build_stage,
+        ):
             return SimpleNamespace(cards=[], nodes=[], node_contexts=[])
 
     monkeypatch.setattr(

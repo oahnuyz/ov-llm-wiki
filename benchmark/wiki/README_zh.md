@@ -875,6 +875,22 @@ uv run python benchmark/wiki/run.py \
   --step gen+eval
 ```
 
+Wiki 的 Document Card 与节点聚合也可以分开运行。节点阶段会复用已经落盘的
+Document Cards，因此节点聚合或正文生成失败后无需再次生成全部初始 cards：
+
+```bash
+uv run python benchmark/wiki/run.py \
+  --config benchmark/wiki/config/ScholarQABench/scholarqa_multi_valid_101.yaml \
+  --step build_wiki_cards
+
+uv run python benchmark/wiki/run.py \
+  --config benchmark/wiki/config/ScholarQABench/scholarqa_multi_valid_101.yaml \
+  --step build_wiki_nodes
+```
+
+`build_wiki_cards` 会替换旧 cards 并清理下游节点；`build_wiki_nodes` 只清理并重建
+节点和运行记录，保留 `cards/`。原有 `build_wiki` 仍执行完整的 cards + nodes 流程。
+
 每个 `gold_answers` 只保存一个答案：原始专家答案后附零基引用编号到论文标题的对照表，以消除 `[0]`、`[1]` 等标签的指代歧义。原始专家答案、完整 `ctxs` 和引用映射也保留在 QA metadata 中。实验继续使用项目现有通用评价指标，不启用 ScholarQABench 官方 Prometheus 或引用正确性指标。
 
 ### MuDABench：Simple 与 Complex

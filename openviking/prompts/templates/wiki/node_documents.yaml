@@ -2,7 +2,7 @@ metadata:
   id: "wiki.node_documents"
   name: "Wiki Node Documents"
   description: "Generate synthesized documents for a Wiki node from source sections"
-  version: "1.0.0"
+  version: "1.5.0"
   language: "en"
   category: "wiki"
 
@@ -13,30 +13,40 @@ variables:
     required: true
 
 template: |
-  Generate Wiki documents for the given Wiki node.
+  Generate synthesized Markdown documents for one scientific Wiki directory.
 
-  Task:
-  - Write the synthesized Markdown content for this Wiki node. Use one document by default; split into multiple documents only to keep each document readable when the content is long.
-  - Use only the section text provided in the input source documents.
-  - Use the node title and scope as the topic boundary: include content inside this boundary, and exclude related but out-of-scope content.
-  - A source document may be an original resource document or a generated lower-layer Wiki node document.
-  - Synthesize across source documents instead of summarizing each source separately.
-  - Organize the content by synthesized knowledge, not by source document.
-  - Do not write one paragraph for source 1, another paragraph for source 2, and so on.
-  - Each substantive paragraph should present a higher-level conclusion, pattern, mechanism, tradeoff, or comparison derived from multiple source documents whenever multiple relevant source documents are available.
-  - Use source-specific details only as supporting material inside a synthesized paragraph, not as the paragraph's organizing principle.
-  - Avoid headings or paragraph openings that name or enumerate individual input sources.
-  - Do not invent document IDs, section URIs, citations, URLs, or other identifiers.
-  - If a factual statement cannot be supported by the provided source sections, do not include it.
+  The input field node.role is authoritative:
+  - parent_directory: this node groups lower-level Wiki directories.
+  - leaf_directory: this node groups original source documents and has no Wiki children.
+
+  Write for the role:
+  - For parent_directory, create a concise navigation and synthesis document. Explain the common axis,
+    name the supported subtopics, compare their relationships, and state their boundaries so a reader can
+    choose the right child area. Do not turn the parent into a broad encyclopedia article.
+  - For leaf_directory, create a detailed scientific synthesis with broad coverage of the distinct in-scope
+    knowledge supported by the source sections. Preserve mechanisms; methods, strategies, and experimental
+    platforms; conditions and populations; exact quantities or directional results; comparisons and
+    tradeoffs; and limitations, failure modes, and remedies when supported. Prefer complete coverage over
+    a short overview, while removing repetition and out-of-scope background.
+  - In a leaf document, keep each named method, system, material, dataset, or experiment next to what it
+    does, how or why it works, the conditions tested, and the resulting evidence. Retain representative
+    study or system names supplied by the sources; do not use opaque source IDs as citations.
+
+  In both roles:
+  - Use node.title and node.scope as a strict inclusion boundary and use only supplied source text.
+  - Synthesize by concept or scientific relationship, not source-by-source. Keep conflicting or materially
+    different findings distinct instead of averaging them into a false consensus.
+  - Put the definition, boundary, and main knowledge map near the beginning. Use concise, searchable
+    headings and retain specific evidence needed for multi-part questions.
+  - Avoid vague claims, duplicated background, per-source headings, and invented facts or identifiers.
+  - Produce substantive prose, not a title plus one generic sentence. Use one document by default; split
+    only when distinct subtopics would otherwise make it difficult to read.
 
   Input:
   {{ input_json }}
 
-  Output requirements:
-  - documents: Markdown content for the Wiki node.
-  - The document must read like a new Wiki-level synthesis, not a sequence of per-source summaries.
-
-  Return only JSON matching the schema.
+  Return only valid JSON that strictly conforms to the provided JSON Schema. The output field documents
+  contains the generated Markdown documents.
 
 llm_config:
   temperature: 0.0

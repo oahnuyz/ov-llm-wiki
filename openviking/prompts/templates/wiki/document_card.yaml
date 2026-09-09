@@ -2,7 +2,7 @@ metadata:
   id: "wiki.document_card"
   name: "Wiki Document Card"
   description: "Generate one Wiki Document Card from a resource document"
-  version: "1.0.0"
+  version: "1.3.0"
   language: "en"
   category: "wiki"
 
@@ -16,11 +16,33 @@ template: |
   Generate one Wiki Document Card for the given resource document.
 
   The input contains content_or_structure and metadata. Use only those fields.
-  Return only the semantic card content: summary, main_points, important_terms, and candidate_topics.
+  The card will be used to group related research and preserve evidence for later synthesis.
+  Return only summary and candidate_topics.
   Do not return doc_id, resource_uri, title, markdown, node fields, or source assignment fields.
+
+  Summary requirements:
+  - State the research question or problem, then preserve supported evidence as compact evidence units:
+    named method, system, material, population, or experiment; mechanism or procedure; conditions;
+    quantitative or directional result; comparison; and limitation or failure mode. Do not force
+    elements absent from the source, but keep causal and conditional relations explicit.
+  - For surveys or multi-method documents, retain distinct approaches and representative named work
+    instead of collapsing them into a generic field summary. Separate measured findings from proposals,
+    hypotheses, interpretations, and open questions.
+  - Retain discriminative terminology, expanded acronyms when available, datasets, metrics, and exact
+    quantities needed to distinguish this document from related work.
+  - Be concise and information-dense. Exclude repeated background, publication metadata, references,
+    figures, attachments, file layout, and shared conference material unless scientifically relevant.
+
+  Candidate topic requirements:
+  - Provide a small set of discriminative scientific noun phrases. Where supported, span the problem,
+    method or mechanism, studied system, evaluation or outcome, and application.
+  - Prefer established phrases and source-supported acronyms or alternate names. Avoid generic terms,
+    title paraphrases, and topics broad enough to join unrelated research.
 
   Input:
   {{ input_json }}
+
+  Return only valid JSON that strictly conforms to the provided JSON Schema.
 
 llm_config:
   temperature: 0.0

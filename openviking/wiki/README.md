@@ -40,7 +40,7 @@ openviking/wiki/
 ├── cards.py
 │   └── 为资源文档和 Wiki 节点生成 Document Card。
 ├── nodes.py
-│   └── 按批次执行候选操作，并物化当前层的暂定节点。
+│   └── 对完整当前层运行 tool-calling 聚合 agent，并物化目录节点。
 ├── assignments.py
 │   └── 把候选物化结果里的来源 ID 确定性转换成 SourceRef。
 ├── documents.py
@@ -65,15 +65,33 @@ openviking/wiki/
 ```text
 资源文档
   -> Document Cards
-  -> 按批次流式候选聚合
+  -> 完整层的 tool-calling 聚合
   -> SourceRef 构造
   -> 节点正文
   -> 节点 card
-  -> 暂定节点生成 Node Card 后继续下一层
+  -> Node Card 的 summary + scope 进入下一层
   -> Manifest 和运行日志
 ```
 
-核心边界是 Document Card。节点发现不直接读所有长文档，而是先读压缩后的 cards。节点正文生成时，再拿该节点被选中的来源文档内容或下层节点正文内容做综合写作。`WikiNode.scope` 是节点的权威边界，长期保存在 `nodes.json`，并继续约束正文生成；node card 的 `summary` 不替代 `scope`。
+节点发现不直接读所有长文档，而是先读压缩后的 cards。原始文档 card 包含
+`summary + candidate_topics`，node card 包含 `summary + scope`；只有原始文档 card
+由模型生成候选主题。节点正文生成时，再拿该节点被选中的来源文档内容或下层节点
+正文内容做综合写作。`WikiNode.scope` 是节点的权威边界，长期保存在 `nodes.json`，
+并继续约束正文生成；node card 的 `summary` 是对 scope 的更具体描述，不替代 scope。
+
+### 校验与聚合失败处理
+
+- 节点正文某一文档项同时存在额外字段、且 `content` 去除首尾空白后少于
+  300 字符时，拒绝整次响应并重试；没有额外字段的短正文不受此规则限制。
+- 正文校验最多尝试 3 次。重试保留原始输入，在 prompt 末尾追加上一次错误与
+  JSON 格式纠正要求，不累积旧反馈；三次仍失败则抛出错误。
+- 聚合仅在成功校验并执行 `finish_layer` 后结束当前层。零工具调用（包括
+  `finish_reason=length`）不会被视为完成；截断响应中有效的调用仍执行并保留。
+- 工具错误、零调用与无进展反馈统一放在下一轮 prompt 末尾。连续 3 轮没有
+  实际节点状态变化且未结束时，抛出错误；标题、scope 或成员等状态变化会重置计数。
+  成功调用但状态未变化也计为无进展，每层总上限仍为 50 轮。
+- 每轮聚合操作日志保存返回文本、完整调用列表（含被拒绝的调用）、usage、
+  结束原因及无进展计数，通过现有逐轮回调落盘，后续构建失败也能保留诊断信息。
 
 ## 资源输入和文档边界
 
@@ -82,6 +100,24 @@ openviking/wiki/
 ```python
 client.build_wiki(resource_uris=["viking://resources/qasper_30_processed_docs"])
 ```
+
+完整构建默认执行 Document Card 和节点聚合两个阶段。也可以显式拆开运行：
+
+```python
+client.build_wiki(
+    resource_uris=["viking://resources/qasper_30_processed_docs"],
+    build_stage="cards",
+)
+client.build_wiki(
+    resource_uris=["viking://resources/qasper_30_processed_docs"],
+    build_stage="nodes",
+)
+```
+
+`cards` 阶段只生成并持久化 `viking://wiki/cards/`；`nodes` 阶段读取这些 cards，
+重新加载原始 source sections，并生成聚合节点、节点正文和 Node Card。单独运行
+`nodes` 前必须先成功运行 `cards`。重新运行 `cards` 会清理旧节点；重新运行
+`nodes` 只清理节点和运行记录，保留可复用的 Document Cards。
 
 如果传入的是目录资源，Wiki 阶段不能靠递归扫描目录来猜哪些路径是一篇文档。复杂目录里同一层级可能同时包含章节、chunk、图片、表格和用户自己组织的子目录，启发式扫描不可靠。
 
@@ -153,23 +189,34 @@ viking://resources/qasper_30_processed_docs/nested/paper_b
 
 ### 节点发现与节点 card
 
-节点从上一层 source cards 中发现。第一层的 source cards 是原始文档 cards；更高层的 source cards 是下层节点生成后的 node cards。模型按批次返回严格的候选操作 JSON。代码按数组顺序执行操作，跨批次维护候选状态，并在所有批次结束后：
+节点从上一层 source cards 中发现。第一层的 source cards 是原始文档 cards，提供
+`candidate_topics`；更高层的 source cards 是下层 node cards，改为直接提供权威
+`scope`。两类 card 都提供 `summary`。每层由一个 tool-calling agent 完成：它在每个
+turn 都看到全部当前层 card 以及已经创建的目录节点，返回一个或多个标准 function
+call；程序按返回顺序立即执行，再把更新后的目录节点和未分配 card 交回下一 turn。
+agent 可创建、增删成员、合并、拆分、重命名或修改 scope，并在没有可信的进一步
+聚合时调用 `finish_layer`。目录节点至少包含两个 card；未分配 card 允许保留，但
+不会进入下一层。详见 `streaming_aggregation_design.md`。
 
-- 根据候选成员数推导 pending/provisional；
-- 删除仍只有一个 card 的 pending 候选；
-- 将至少包含两个 card 的 provisional 候选物化为 WikiNode；
-- 基于已知 `DocumentCard` 构造 `SourceRef`；
+层结束后，程序才按 `max_cards_per_node` 对过大的目录节点做滑动窗口切分，随后：
+
+- 将有效目录节点物化为 `WikiNode`；
+- 基于当前层的原始 document cards 或 node cards 构造 `SourceRef`；
 - 生成节点正文和 `nodes/<node_id>/card.md/json`。
 
 `assignments.py` 不调用 LLM。它只校验模型返回的来源 ID 是否存在，并用已知 card 构造 SourceRef。
 
 ### 上层节点
 
-上层节点从已生成的下层 node cards 中发现，不再直接读取原始长文档。上层正文的输入是当前 node 的 title/scope，以及下层节点正文转换出的 source sections。
+上层节点从已生成的下层 node cards 中发现，不再直接读取原始长文档。聚合输入直接
+使用下层节点的 scope，不再为 node card 生成一组新的候选主题。上层正文的输入是
+当前 node 的 title/scope，以及下层节点正文转换出的 source sections。
 
 上层正文 prompt 的重点是综合：输出应围绕当前层知识点组织，而不是按照 source 顺序逐个总结。
 
-只要当前层产生 provisional 节点，就把这些新生成的 Node Card 作为下一层输入；如果当前层清理后没有 provisional 候选，候选列表为空，聚合立即停止。不存在固定最大层数或额外的继续判断。同一个下层节点可以属于多个上层节点，因此 Wiki 结构是 DAG，而不是严格树。
+只要当前层产生目录节点，就把这些新生成的 Node Card 作为下一层输入；如果 agent 完成该层后没有目录节点，聚合立即停止。不存在固定最大层数或额外的继续判断。同一个下层节点可以属于多个上层节点，因此语义结构仍是 DAG。
+
+落盘分成两个内部阶段。第一阶段完成全部层级的聚合和节点内容生成，只把中间状态写入非索引的 `build/`；第二阶段在图收敛后统一物化目录树。每个节点按模型聚合结果中的父节点顺序选择第一个父节点作为主父节点，并直接嵌套在主父节点目录中；其余父节点通过 OpenViking relation link 指向同一个主节点目录，不复制节点内容。
 
 ### Bot context tree
 
@@ -189,34 +236,48 @@ MCP 侧的 `context_tree` tool 用于给 bot 展示某个 `viking://` URI 附近
 viking://wiki/my_wiki/
 ├── nodes.json
 ├── source_assignments.json
+├── node_index.json
 ├── cards/
 │   ├── <doc_id>.card.md
 │   └── <doc_id>.card.json
 ├── nodes/
-│   └── <node_id>/
+│   └── <root_node_id>/
 │       ├── card.md
 │       ├── card.json
-│       ├── documents/
-│       │   └── 0001.md
-│       └── sources/
-│           └── <ref_id>.ref.json
+│       ├── 0001.md
+│       ├── sources/
+│       │   └── <ref_id>.ref.json
+│       └── <child_node_id>/
+│           ├── card.md
+│           ├── card.json
+│           ├── 0001.md
+│           ├── sources/
+│           └── <grandchild_node_id>/
+├── build/
+│   ├── manifest.json
+│   ├── nodes.json
+│   ├── source_assignments.json
+│   └── layers/
 └── run/
     ├── config.json
     ├── prompts.jsonl
     ├── raw_outputs.jsonl
+    ├── aggregation_operations.jsonl
     └── logs.md
 ```
 
 关键文件：
 
-- `nodes.json`：所有已物化节点，包括层级和父子关系；pending 候选不会写入。
+- `nodes.json`：所有已物化节点，包括层级和父子关系。
 - `source_assignments.json`：节点级来源引用和未分配来源。
+- `node_index.json`：每个节点的主路径、正文 URI、主父节点、次父节点和聚合顺序，供按稳定 node ID 定位真实目录。
 - `cards/*.card.json`：原始文档的结构化 card。
 - `cards/*.card.md`：原始文档的人类可读 card。
-- `nodes/<node_id>/card.json`：节点的结构化 card，供上层发现和来源引用使用。
-- `nodes/<node_id>/card.md`：节点的人类可读 card，替代旧 `node.md`。
-- `nodes/<node_id>/documents/*.md`：综合生成的节点正文。
-- `nodes/<node_id>/sources/*.ref.json`：该节点可用的来源列表。
+- `nodes/<root>/.../<node>/card.json`：节点的结构化 `summary + scope` card，供上层发现和来源引用使用，不包含 `candidate_topics`，也不进入检索索引。
+- `nodes/<root>/.../<node>/card.md`：节点的人类可读 card，不进入检索索引。
+- `nodes/<root>/.../<node>/*.md`：以 `0001.md`、`0002.md` 命名的综合节点正文，也是 Wiki 检索通道唯一索引的节点文件。
+- `nodes/<root>/.../<node>/sources/*.ref.json`：该节点可用的来源列表，不进入检索索引。
+- `build/`：聚合阶段的非索引中间状态；目录树完成物化前不会把半成品节点暴露到正式 `nodes/`。
 - `run/prompts.jsonl`：每次 LLM 调用的 prompt、schema name 和 schema hash。
 - `run/raw_outputs.jsonl`：模型返回并成功解析后的结构化输出。
 
@@ -224,12 +285,12 @@ viking://wiki/my_wiki/
 
 ## LLM 行为
 
-所有 Wiki LLM 调用都经过 `WikiLLMRunner.complete_json(...)`，再由 `StructuredVLM` 使用 JSON Schema response format 调模型。Prompt 模板放在 `openviking/prompts/templates/wiki/`。
+Document Card、节点正文和 Node Card 调用都经过 `WikiLLMRunner.complete_json(...)`，由 `StructuredVLM` 使用 JSON Schema response format 调模型。节点聚合调用 `WikiLLMRunner.complete_tool_calls(...)`，保留 provider 返回的标准 function calls 并由固定程序执行。Prompt 模板放在 `openviking/prompts/templates/wiki/`。
 
 当前会调用 LLM 的阶段：
 
 - `doc_card`
-- `candidate_aggregation`
+- `node_aggregation_agent`
 - `node_documents`
 - `node_card`
 
@@ -265,7 +326,7 @@ client.clear_wiki()
 2. 校验资源存在，并尝试读取每个 resource root 下的 `.wiki_documents.json`。
 3. 如果存在文档边界 manifest，就按文档记录展开成多个 `WikiResourceInput`；否则把 resource root 当作单篇输入。
 4. 创建 `WikiVikingFSWriter` 和 `WikiContentLoader`。
-5. 调用 `WikiPipeline.run_from_inputs(...)`。
+5. 根据 `build_stage=all|cards|nodes` 调用 `WikiPipeline.run_from_inputs(...)`。
 
 `WikiService.clear_wiki(...)` 删除 `wiki_root_uri` 下的 Wiki 产物，默认是 `viking://wiki/`。底层 `VikingFS.rm(..., recursive=True)` 会联动清理这些 Wiki 文件对应的向量索引。清理接口固定幂等：目标不存在也返回成功。它不删除 `viking://resources/...` 下的原始入库文档、语义摘要、资源向量索引或 `.wiki_documents.json`。因此：
 
@@ -292,9 +353,11 @@ add_resource -> build_wiki -> clear_wiki
 
 | 参数 | 含义 | 默认值 |
 | --- | --- | --- |
-| `aggregation_batch_size` | 每批发送给候选聚合 LLM 的 card 数量上限 | `15` |
+| `aggregation_agent_max_turns` | 每层聚合 agent 最大决策轮数 | `50` |
+| `max_cards_per_node` | 层结束后按滑动窗口切分目录节点时的窗口大小 | `4` |
 | `max_concurrent_cards` | Document Card 并发生成数 | `10` |
 | `max_concurrent_nodes` | 节点正文和 Node Card 并发生成数 | `10` |
+| `llm_request_timeout_seconds` | 单次 Wiki LLM 请求超时；超时后重试，最多总计 3 次 | `300` |
 
 ## 排查问题
 
@@ -306,10 +369,10 @@ add_resource -> build_wiki -> clear_wiki
 
 如果没有生成节点正文：
 
-1. 看 `nodes.json`，确认当前层是否物化了 provisional 节点。
-2. 看 `source_assignments.json`，确认候选成员是否正确。
-3. 看 `run/prompts.jsonl`，确认各批次的 `existing_candidates` 和 `current_batch_cards` 输入。
-4. 看 `run/raw_outputs.jsonl`，确认模型的有序 operations 输出。
+1. 看 `nodes.json`，确认当前层是否物化了目录节点。
+2. 看 `source_assignments.json`，确认节点成员和未分配 card 是否正确。
+3. 看 `run/prompts.jsonl`，确认每个 agent turn 的 `existing_nodes` 和 `unassigned_cards` 输入。
+4. 看 `run/raw_outputs.jsonl` 与 `run/aggregation_operations.jsonl`，确认 function calls、执行顺序和校验错误。
 
 如果是模型输出不稳定：
 

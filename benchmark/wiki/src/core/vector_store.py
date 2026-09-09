@@ -124,6 +124,7 @@ class VikingStoreWrapper:
         resource_uris: list[str],
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
+        build_stage: str = "all",
     ) -> dict:
         start_time = time.time()
         if not resource_uris:
@@ -136,6 +137,7 @@ class VikingStoreWrapper:
             resource_uris=resource_uris,
             card_input_mode=card_input_mode,
             max_card_input_chars=max_card_input_chars,
+            build_stage=build_stage,
         )
         result["time"] = time.time() - start_time
         return result
@@ -160,4 +162,10 @@ class VikingStoreWrapper:
         """Release the underlying OpenViking client if supported."""
         close = getattr(self.client, "close", None)
         if callable(close):
+            async_client = getattr(self.client, "_async_client", None)
+            if getattr(async_client, "_initialized", False):
+                from openviking.storage.queuefs.queue_manager import get_queue_manager
+                from openviking_cli.utils import run_async
+
+                run_async(get_queue_manager().wait_complete(timeout=600))
             close()

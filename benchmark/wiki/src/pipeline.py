@@ -85,9 +85,9 @@ class BenchmarkPipeline:
             }
         })
 
-    def run_build_wiki(self):
+    def run_build_wiki(self, build_stage: str = "all"):
         """Stage: Build Wiki from resources imported by the import step."""
-        self.logger.info(">>> Stage: Build Wiki")
+        self.logger.info(f">>> Stage: Build Wiki ({build_stage})")
         if not self.db:
             raise RuntimeError("Cannot build Wiki without a vector store")
 
@@ -101,6 +101,7 @@ class BenchmarkPipeline:
             resource_uris=resource_uris,
             card_input_mode=wiki_card_input_mode,
             max_card_input_chars=wiki_max_card_input_chars,
+            build_stage=build_stage,
         )
         self.logger.info(f"Wiki build finished. Time: {wiki_stats['time']:.2f}s")
         self._update_report({
@@ -108,6 +109,7 @@ class BenchmarkPipeline:
                 "Total Wiki Build Time (s)": wiki_stats["time"],
                 "Resource Roots": resource_uris,
                 "Status": wiki_stats.get("status"),
+                "Build Stage": wiki_stats.get("build_stage", build_stage),
                 "Cards": wiki_stats.get("cards", 0),
                 "Nodes": wiki_stats.get("nodes", 0),
                 "Node Contexts": wiki_stats.get("node_contexts", 0),

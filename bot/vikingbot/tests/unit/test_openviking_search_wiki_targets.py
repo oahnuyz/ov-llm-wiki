@@ -6,7 +6,12 @@ os.environ["OPENVIKING_CLI_CONFIG_FILE"] = "/tmp/openviking-cli-missing-test.con
 import pytest
 
 from vikingbot.agent.tools.base import ToolContext
-from vikingbot.agent.tools.ov_file import VikingGrepTool, VikingMultiReadTool, VikingSearchTool
+from vikingbot.agent.tools.ov_file import (
+    VikingGrepTool,
+    VikingListTool,
+    VikingMultiReadTool,
+    VikingSearchTool,
+)
 
 
 class FakeVikingClient:
@@ -82,6 +87,84 @@ class FakeVikingMultiReadTool(VikingMultiReadTool):
         pass
 
 
+class FakeListClient:
+    def __init__(self):
+        self.list_calls = []
+
+    async def list_resources(self, path: str, recursive: bool = False):
+        self.list_calls.append((path, recursive))
+        if path == "viking://wiki/nodes/parent":
+            entries = [
+                {
+                    "name": "child",
+                    "size": 0,
+                    "uri": f"{path}/child",
+                    "isDir": True,
+                },
+                {
+                    "name": "0001.md",
+                    "size": 100,
+                    "uri": f"{path}/0001.md",
+                    "isDir": False,
+                },
+                {
+                    "name": "sources",
+                    "size": 0,
+                    "uri": f"{path}/sources",
+                    "isDir": True,
+                },
+                {
+                    "name": "card.md",
+                    "size": 80,
+                    "uri": f"{path}/card.md",
+                    "isDir": False,
+                },
+                {
+                    "name": "card.json",
+                    "size": 120,
+                    "uri": f"{path}/card.json",
+                    "isDir": False,
+                },
+            ]
+            if recursive:
+                entries.extend(
+                    [
+                        {
+                            "name": "paper.ref.json",
+                            "size": 40,
+                            "uri": f"{path}/sources/paper.ref.json",
+                            "isDir": False,
+                        },
+                        {
+                            "name": "card.json",
+                            "size": 120,
+                            "uri": f"{path}/child/card.json",
+                            "isDir": False,
+                        },
+                        {
+                            "name": "0001.md",
+                            "size": 90,
+                            "uri": f"{path}/child/0001.md",
+                            "isDir": False,
+                        },
+                    ]
+                )
+            return entries
+        return []
+
+
+class FakeVikingListTool(VikingListTool):
+    def __init__(self, client: FakeListClient):
+        super().__init__()
+        self.client = client
+
+    async def _get_client(self, tool_context: ToolContext):
+        return self.client
+
+    async def _release_client(self, tool_context: ToolContext, client) -> None:
+        pass
+
+
 class FakeGrepClient:
     def __init__(self, *, actor_peer_id: str | None = None):
         self.actor_peer_id = actor_peer_id
@@ -111,12 +194,12 @@ class FakeGrepClient:
         return {
             "matches": [
                 {
-                    "uri": "viking://wiki/nodes/steam/documents/0001.md",
+                    "uri": "viking://wiki/nodes/steam/0001.md",
                     "line": 1,
                     "content": "steam creator support",
                 },
                 {
-                    "uri": "viking://wiki/nodes/steam_workshop/documents/0001.md",
+                    "uri": "viking://wiki/nodes/steam_workshop/0001.md",
                     "line": 2,
                     "content": "steam workshop support",
                 },
@@ -167,8 +250,8 @@ async def test_openviking_grep_includes_wiki_nodes_for_default_target():
     assert "viking://wiki/nodes" in target_uris
     assert "viking://user/memories/" in target_uris
     assert "viking://user/skills/" in target_uris
-    assert "viking://wiki/nodes/steam/documents/0001.md" in result
-    assert "viking://wiki/nodes/steam_workshop/documents/0001.md" in result
+    assert "viking://wiki/nodes/steam/0001.md" in result
+    assert "viking://wiki/nodes/steam_workshop/0001.md" in result
 
 
 @pytest.mark.asyncio
@@ -184,8 +267,8 @@ async def test_openviking_grep_keeps_explicit_wiki_node_target_for_client_api():
 
     target_uris = [call["uri"] for call in client.grep_calls]
     assert target_uris == ["viking://wiki/nodes/steam"]
-    assert "viking://wiki/nodes/steam/documents/0001.md" in result
-    assert "viking://wiki/nodes/steam_workshop/documents/0001.md" in result
+    assert "viking://wiki/nodes/steam/0001.md" in result
+    assert "viking://wiki/nodes/steam_workshop/0001.md" in result
 
 
 @pytest.mark.asyncio
@@ -209,7 +292,7 @@ async def test_openviking_search_includes_wiki_nodes_for_sender_fanout_default_t
 async def test_openviking_multi_read_supports_wiki_node_documents():
     client = FakeReadClient()
     tool = FakeVikingMultiReadTool(client)
-    uri = "viking://wiki/nodes/steam_community/documents/0001.md"
+    uri = "viking://wiki/nodes/steam_community/0001.md"
 
     result = await tool.execute(ToolContext(), uris=[uri])
 
@@ -217,3 +300,65 @@ async def test_openviking_multi_read_supports_wiki_node_documents():
     assert f"--- START OF {uri} ---" in result
     assert f"content for {uri}" in result
     assert f"--- END OF {uri} ---" in result
+
+
+@pytest.mark.asyncio
+async def test_configured_root_limits_default_search_to_wiki(monkeypatch):
+    monkeypatch.setenv("VIKINGBOT_OPENVIKING_ROOT_URI", "viking://wiki/nodes")
+    client = FakeVikingClient(actor_peer_id="cli-user")
+    tool = FakeVikingSearchTool(client)
+
+    await tool.execute(ToolContext(actor_peer_id="cli-user"), query="steam")
+
+    assert [call["target_uri"] for call in client.search_calls] == ["viking://wiki/nodes"]
+
+
+@pytest.mark.asyncio
+async def test_configured_root_rejects_resource_search_and_read(monkeypatch):
+    monkeypatch.setenv("VIKINGBOT_OPENVIKING_ROOT_URI", "viking://wiki/nodes")
+    search_client = FakeVikingClient()
+    search_tool = FakeVikingSearchTool(search_client)
+    read_client = FakeReadClient()
+    read_tool = FakeVikingMultiReadTool(read_client)
+
+    search_result = await search_tool.execute(
+        ToolContext(), query="steam", target_uri="viking://resources/paper"
+    )
+    read_result = await read_tool.execute(
+        ToolContext(), uris=["viking://resources/paper/overview.md"]
+    )
+
+    assert "outside the configured OpenViking retrieval root" in search_result
+    assert "outside the configured OpenViking retrieval root" in read_result
+    assert search_client.search_calls == []
+    assert read_client.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_wiki_list_exposes_node_content_but_hides_cards_and_sources():
+    client = FakeListClient()
+    tool = FakeVikingListTool(client)
+
+    result = await tool.execute(ToolContext(), uri="viking://wiki/nodes/parent")
+
+    assert "viking://wiki/nodes/parent/child" in result
+    assert "viking://wiki/nodes/parent/0001.md" in result
+    assert "viking://wiki/nodes/parent/sources" not in result
+    assert "viking://wiki/nodes/parent/card.md" not in result
+    assert "viking://wiki/nodes/parent/card.json" not in result
+    assert "logical_type" not in result
+
+
+@pytest.mark.asyncio
+async def test_recursive_wiki_list_hides_source_descendants_and_nested_cards():
+    client = FakeListClient()
+    tool = FakeVikingListTool(client)
+
+    result = await tool.execute(
+        ToolContext(), uri="viking://wiki/nodes/parent", recursive=True
+    )
+
+    assert "viking://wiki/nodes/parent/child/0001.md" in result
+    assert "viking://wiki/nodes/parent/sources" not in result
+    assert "paper.ref.json" not in result
+    assert "viking://wiki/nodes/parent/child/card.json" not in result

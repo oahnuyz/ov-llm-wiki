@@ -174,6 +174,7 @@ class LocalClient(BaseClient):
         wiki_root_uri: str = "viking://wiki/",
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
+        build_stage: str = "all",
         telemetry: TelemetryRequest = False,
     ) -> Dict[str, Any]:
         """Build Wiki from existing resources."""
@@ -186,6 +187,7 @@ class LocalClient(BaseClient):
                 wiki_root_uri=wiki_root_uri,
                 card_input_mode=card_input_mode,
                 max_card_input_chars=max_card_input_chars,
+                build_stage=build_stage,
             ),
         )
         return attach_telemetry_payload(execution.result, execution.telemetry)

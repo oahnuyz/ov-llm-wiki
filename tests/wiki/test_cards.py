@@ -5,7 +5,13 @@ from openviking.wiki.llm import WikiLLMRunner
 from openviking.wiki.schemas import NodeDocument, ResourceDocument, WikiNode
 
 from .fakes import FakeVLM
-from .test_pipeline_order import _card_content_response
+
+
+def _card_content_response(index: int) -> dict:
+    return {
+        "summary": f"Paper {index} discusses question answering.",
+        "candidate_topics": ["question answering"],
+    }
 
 
 @pytest.mark.asyncio
@@ -36,9 +42,6 @@ async def test_node_card_uses_wiki_node_uri_and_node_card_step():
         [
             {
                 "summary": "Question answering node synthesis.",
-                "main_points": ["QA synthesis"],
-                "important_terms": ["question answering"],
-                "candidate_topics": ["question answering systems"],
             }
         ]
     )
@@ -58,4 +61,7 @@ async def test_node_card_uses_wiki_node_uri_and_node_card_step():
     assert card.doc_id == "question_answering"
     assert card.resource_uri == "viking://wiki/nodes/question_answering/"
     assert card.summary == "Question answering node synthesis."
+    assert card.scope == "QA methods and evaluation."
+    assert "candidate_topics" not in card.model_dump()
+    assert set(fake_vlm.schemas[0]["properties"]) == {"summary"}
     assert fake_vlm.calls

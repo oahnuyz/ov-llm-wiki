@@ -26,6 +26,7 @@ class BuildWikiRequest(BaseModel):
     wiki_root_uri: str = "viking://wiki/"
     card_input_mode: Literal["summary", "raw_chunk"] = "summary"
     max_card_input_chars: int = 20000
+    build_stage: Literal["all", "cards", "nodes"] = "all"
     telemetry: TelemetryRequest = False
 
 
@@ -50,6 +51,7 @@ async def build_wiki(
             wiki_root_uri=request.wiki_root_uri,
             card_input_mode=request.card_input_mode,
             max_card_input_chars=request.max_card_input_chars,
+            build_stage=request.build_stage,
         )
 
     execution = await run_operation(

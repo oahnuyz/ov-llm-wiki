@@ -8,7 +8,6 @@ from openviking.prompts.manager import PromptManager
 
 from .schemas import (
     AggregationCardView,
-    CandidateView,
     NodeDocument,
     ResourceDocument,
     WikiNode,
@@ -30,16 +29,28 @@ def build_document_card_prompt(doc: ResourceDocument) -> str:
     return _render_wiki_prompt("wiki.document_card", payload)
 
 
-def build_candidate_aggregation_prompt(
-    existing_candidates: list[CandidateView],
-    current_batch_cards: list[AggregationCardView],
+def build_node_aggregation_agent_prompt(
+    existing_nodes: list[dict],
+    unassigned_cards: list[AggregationCardView],
+    tool_errors: list[str],
 ) -> str:
-    """Build the strict ordered-operation prompt for one aggregation batch."""
+    """Build one full-layer tool-calling aggregation agent turn."""
     inputs = {
-        "existing_candidates": [candidate.model_dump(mode="json") for candidate in existing_candidates],
-        "current_batch_cards": [card.model_dump(mode="json") for card in current_batch_cards],
+        "existing_nodes": existing_nodes,
+        "unassigned_cards": [
+            card.model_dump(mode="json", exclude_none=True) for card in unassigned_cards
+        ],
     }
-    return _render_wiki_prompt("wiki.candidate_aggregation", inputs)
+    prompt = _render_wiki_prompt("wiki.node_aggregation_agent", inputs)
+    if tool_errors:
+        prompt = (
+            f"{prompt.rstrip()}\n\nPrevious turn error feedback (tool_errors):\n"
+            f"{json.dumps(tool_errors, ensure_ascii=False, indent=2)}\n"
+            "The layer is not finished. Correct the errors using the current state above. "
+            "Return structured function calls, not explanatory text. If no useful edit "
+            "remains, call finish_layer."
+        )
+    return prompt
 
 
 def build_node_card_prompt(node: WikiNode, documents: list[NodeDocument]) -> str:
@@ -57,8 +68,13 @@ def build_node_documents_prompt(
     node: WikiNode,
     source_documents: list[dict],
 ) -> str:
+    node_role = "parent_directory" if node.child_node_ids else "leaf_directory"
     inputs = {
-        "node": node.model_dump(include={"title", "scope"}, mode="json"),
+        "node": {
+            **node.model_dump(include={"title", "scope"}, mode="json"),
+            "role": node_role,
+            "child_count": len(node.child_node_ids),
+        },
         "source_documents": source_documents,
     }
     return _render_wiki_prompt("wiki.node_documents", inputs)

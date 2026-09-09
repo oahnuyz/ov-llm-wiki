@@ -8,9 +8,11 @@ adapter:
 execution:
   mode: "vikingbot"
   server_port: 2026
-  max_workers: 1
+  max_workers: 3
   retrieval_topk: 5
-  max_queries: null
+  # QA-generation retrieval is intentionally isolated to synthesized Wiki nodes.
+  vikingbot_openviking_root_uri: "viking://wiki/nodes"
+  max_queries: 92
   skip_ingestion: false
   ingest_mode: "directory"
   build_wiki: true

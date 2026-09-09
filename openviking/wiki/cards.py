@@ -12,6 +12,8 @@ from .prompts import build_document_card_prompt, build_node_card_prompt
 from .schemas import (
     DocumentCard,
     DocumentCardContent,
+    NodeCard,
+    NodeCardContent,
     NodeDocument,
     ResourceDocument,
     WikiNode,
@@ -57,16 +59,25 @@ class DocumentCardGenerator:
         documents: list[NodeDocument],
         *,
         resource_uri: str,
-    ) -> DocumentCard:
+    ) -> NodeCard:
         prompt = build_node_card_prompt(node, documents)
-        return await self._generate_card_from_prompt(
+        content = await self._complete_card_content(
             prompt=prompt,
             step="node_card",
             retry_step="node_card_retry",
             doc_id=node.node_id,
-            resource_uri=resource_uri,
-            title=node.title,
+            content_model=NodeCardContent,
         )
+        card = NodeCard.model_validate(
+            {
+                **content.model_dump(mode="json"),
+                "doc_id": node.node_id,
+                "resource_uri": resource_uri,
+                "title": node.title,
+                "scope": node.scope,
+            }
+        )
+        return card.model_copy(update={"markdown": render_card_markdown(card)})
 
     async def _generate_card_from_prompt(
         self,
@@ -78,16 +89,43 @@ class DocumentCardGenerator:
         resource_uri: str,
         title: str,
     ) -> DocumentCard:
+        content = await self._complete_card_content(
+            prompt=prompt,
+            step=step,
+            retry_step=retry_step,
+            doc_id=doc_id,
+            content_model=DocumentCardContent,
+        )
+        card = DocumentCard.model_validate(
+            {
+                **content.model_dump(mode="json"),
+                "doc_id": doc_id,
+                "resource_uri": resource_uri,
+                "title": title,
+            }
+        )
+        if not card.markdown:
+            card = card.model_copy(update={"markdown": render_card_markdown(card)})
+        return card
+
+    async def _complete_card_content(
+        self,
+        *,
+        prompt: str,
+        step: str,
+        retry_step: str,
+        doc_id: str,
+        content_model: type[DocumentCardContent] | type[NodeCardContent],
+    ) -> DocumentCardContent | NodeCardContent:
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
                 result = await self.llm.complete_json(
                     step=step if attempt == 1 else retry_step,
                     prompt=prompt,
-                    schema=DocumentCardContent.model_json_schema(),
+                    schema=content_model.model_json_schema(),
                 )
-                content = DocumentCardContent.model_validate(result)
-                break
+                return content_model.model_validate(result)
             except (RuntimeError, ValidationError) as exc:
                 last_error = exc
                 if attempt == 3:
@@ -101,22 +139,24 @@ class DocumentCardGenerator:
         else:
             assert last_error is not None
             raise last_error
-        card = DocumentCard.model_validate(
-            {
-                **content.model_dump(mode="json"),
-                "doc_id": doc_id,
-                "resource_uri": resource_uri,
-                "title": title,
-            }
-        )
-        if not card.markdown:
-            card = card.model_copy(update={"markdown": render_card_markdown(card)})
-        return card
 
 
-def render_card_markdown(card: DocumentCard) -> str:
-    main_points = "\n".join(f"- {item}" for item in card.main_points)
-    terms = "\n".join(f"- {item}" for item in card.important_terms)
+def render_card_markdown(card: DocumentCard | NodeCard) -> str:
+    if isinstance(card, NodeCard):
+        return f"""# Wiki Card: {card.title}
+
+## Source Info
+
+- Source URI: {card.resource_uri}
+
+## Scope
+
+{card.scope}
+
+## Summary
+
+{card.summary}
+"""
     topics = "\n".join(f"- {item}" for item in card.candidate_topics)
     return f"""# Wiki Card: {card.title}
 
@@ -127,14 +167,6 @@ def render_card_markdown(card: DocumentCard) -> str:
 ## Summary
 
 {card.summary}
-
-## Main Points
-
-{main_points}
-
-## Important Terms
-
-{terms}
 
 ## Candidate Wiki Topics
 

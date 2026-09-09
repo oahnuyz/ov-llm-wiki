@@ -276,11 +276,17 @@ def _ensure_openviking_server(ov_conf_path: str) -> None:
         raise RuntimeError("openviking-server did not become healthy in time")
 
 
-def _build_vikingbot_env(ov_conf_path: str) -> dict[str, str]:
+def _build_vikingbot_env(
+    ov_conf_path: str,
+    *,
+    openviking_root_uri: str = "",
+) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["OPENVIKING_CONFIG_FILE"] = ov_conf_path
+    if openviking_root_uri:
+        env["VIKINGBOT_OPENVIKING_ROOT_URI"] = openviking_root_uri.rstrip("/")
 
     try:
         with open(ov_conf_path, "r", encoding="utf-8") as f:
@@ -293,6 +299,137 @@ def _build_vikingbot_env(ov_conf_path: str) -> dict[str, str]:
         logger.warning(f"Failed to read API key from ov.conf: {e}")
 
     return env
+
+
+def _find_wiki_metadata_dir(vector_store_path: str) -> Path:
+    store_path = Path(vector_store_path).expanduser().resolve()
+    preferred = store_path / "viking" / "default" / "wiki"
+    if (preferred / "nodes.json").is_file() and (preferred / "node_index.json").is_file():
+        return preferred
+
+    candidates = sorted(
+        path.parent
+        for path in (store_path / "viking").glob("*/wiki/nodes.json")
+        if (path.parent / "node_index.json").is_file()
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(
+            f"Wiki metadata not found below vector store: {store_path}"
+        )
+    raise RuntimeError(
+        f"Multiple Wiki metadata directories found below vector store: {candidates}"
+    )
+
+
+def _load_wiki_directory_catalog(vector_store_path: str) -> str:
+    """Render the complete Wiki DAG for the first QA agent turn."""
+    wiki_dir = _find_wiki_metadata_dir(vector_store_path)
+    nodes_payload = json.loads((wiki_dir / "nodes.json").read_text(encoding="utf-8"))
+    index_payload = json.loads((wiki_dir / "node_index.json").read_text(encoding="utf-8"))
+    raw_nodes = nodes_payload.get("nodes") if isinstance(nodes_payload, dict) else None
+    node_index = index_payload.get("nodes") if isinstance(index_payload, dict) else None
+    if not isinstance(raw_nodes, list) or not isinstance(node_index, dict):
+        raise RuntimeError(f"Invalid Wiki metadata format in {wiki_dir}")
+
+    nodes_by_id: dict[str, dict[str, Any]] = {}
+    for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+            continue
+        node_id = str(raw_node.get("node_id") or "").strip()
+        if node_id:
+            nodes_by_id[node_id] = raw_node
+    if not nodes_by_id:
+        raise RuntimeError(f"Wiki metadata contains no nodes: {wiki_dir / 'nodes.json'}")
+
+    parent_ids_by_node: dict[str, list[str]] = {}
+    children_by_node: dict[str, list[str]] = {node_id: [] for node_id in nodes_by_id}
+    for node_id, raw_node in nodes_by_id.items():
+        index_entry = node_index.get(node_id, {})
+        if not isinstance(index_entry, dict):
+            index_entry = {}
+        parent_ids = list(raw_node.get("parent_node_ids") or [])
+        if not parent_ids:
+            parent_ids = [
+                index_entry.get("primary_parent_id"),
+                *(index_entry.get("secondary_parent_ids") or []),
+            ]
+        parent_ids = list(
+            dict.fromkeys(
+                str(parent_id).strip()
+                for parent_id in parent_ids
+                if str(parent_id or "").strip() in nodes_by_id
+            )
+        )
+        parent_ids_by_node[node_id] = parent_ids
+        for parent_id in parent_ids:
+            children_by_node[parent_id].append(node_id)
+
+    catalog_entries: list[dict[str, Any]] = []
+    for node_id, raw_node in nodes_by_id.items():
+        index_entry = node_index.get(node_id, {})
+        primary_uri = str(index_entry.get("primary_uri") or "").strip().rstrip("/")
+        if not primary_uri:
+            raise RuntimeError(f"Wiki node {node_id} has no primary_uri in node_index.json")
+        catalog_entries.append(
+            {
+                "node_id": node_id,
+                "uri": primary_uri,
+                "scope": str(raw_node.get("scope") or "").strip(),
+                "parents": parent_ids_by_node[node_id],
+                "children": sorted(children_by_node[node_id]),
+            }
+        )
+
+    catalog_entries.sort(key=lambda entry: (entry["uri"].count("/"), entry["uri"]))
+    lines = [
+        f"Complete Wiki directory DAG ({len(catalog_entries)} nodes).",
+        "Format: node_id<TAB>uri<TAB>parents<TAB>children<TAB>scope.",
+        "For every node, document_uri is <uri>/0001.md.",
+    ]
+    for entry in catalog_entries:
+        scope = str(entry["scope"]).replace("\t", " ").replace("\n", " ")
+        lines.append(
+            "\t".join(
+                [
+                    entry["node_id"],
+                    entry["uri"],
+                    f"parents={json.dumps(entry['parents'], ensure_ascii=False, separators=(',', ':'))}",
+                    f"children={json.dumps(entry['children'], ensure_ascii=False, separators=(',', ':'))}",
+                    f"scope={scope}",
+                ]
+            )
+        )
+    return "\n".join(lines)
+
+
+def _build_vikingbot_input_message(
+    question: str,
+    wiki_catalog: str,
+    *,
+    openviking_root_uri: str = "",
+) -> str:
+    wiki_only_instruction = ""
+    if openviking_root_uri:
+        wiki_only_instruction = (
+            f"This run is restricted to {openviking_root_uri}; all OpenViking retrieval "
+            "tools enforce that boundary, so do not use original resources, memories, or skills. "
+        )
+    return (
+        "Answer this question as briefly as possible. "
+        "Use only the information available in the database. "
+        "Do not use any external source. "
+        "Always use OpenViking tools first. Search first, then read the results to answer. "
+        + wiki_only_instruction
+        + "The complete Wiki directory DAG is supplied below. First select the most relevant "
+        "directory node(s), then call openviking_search with target_uri set to those node URIs. "
+        "Read the Wiki node document URI when a result or directory appears relevant. "
+        "Use parent/child relations to narrow or broaden the search, and avoid repeating a query "
+        "unless the new query targets a genuinely different knowledge gap."
+        f"\n\n{wiki_catalog}"
+        f"\n\nQuestion: {question}"
+    )
 
 
 def _sanitize_json_text(text: str) -> str:
@@ -346,6 +483,9 @@ class VikingBotRunner:
         self.llm_config = config.get("llm")
         self.embedding_config = config.get("embedding")
         self.server_port = config.get("execution", {}).get("server_port")
+        self.openviking_root_uri = str(
+            config.get("execution", {}).get("vikingbot_openviking_root_uri") or ""
+        ).strip().rstrip("/")
         self.ov_conf_path = ov_conf_path or config.get("_ov_conf_path") or _OV_CONF_PATH
 
     def generate_answer(self, question: str, session_id: Optional[str] = None) -> Dict[str, Any]:
@@ -363,15 +503,10 @@ class VikingBotRunner:
             logger.info(f"Using vector store: {self.vector_store_path}")
             _ensure_openviking_server(ov_conf_path)
 
-            input_msg = (
-                "Answer this question as briefly as possible. "
-                "Use only the information available in the database. "
-                "Do not use any external source. "
-                "Always use OpenViking tools first. Search first, then read the results to answer. "
-                "Use the default OpenViking search scope; do not force a specific target_uri unless needed. "
-                "Search results may come from original resources or wiki nodes. "
-                "If wiki node documents are relevant, read them and use them as evidence together with original resources when useful."
-                f"\n\nQuestion: {question}"
+            input_msg = _build_vikingbot_input_message(
+                question,
+                _load_wiki_directory_catalog(self.vector_store_path),
+                openviking_root_uri=self.openviking_root_uri,
             )
 
             safe_session_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)
@@ -401,7 +536,10 @@ class VikingBotRunner:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=_build_vikingbot_env(ov_conf_path),
+                env=_build_vikingbot_env(
+                    ov_conf_path,
+                    openviking_root_uri=self.openviking_root_uri,
+                ),
             )
             with _BOT_PROC_LOCK:
                 _ACTIVE_BOT_PROCESSES.add(proc)

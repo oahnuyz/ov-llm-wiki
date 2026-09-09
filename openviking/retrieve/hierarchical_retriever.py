@@ -491,9 +491,13 @@ class HierarchicalRetriever:
     @classmethod
     def _is_wiki_document_uri(cls, uri: str) -> bool:
         display_uri = cls._display_uri(uri)
+        filename = display_uri.rsplit("/", 1)[-1]
         return (
             display_uri.startswith("viking://wiki/nodes/")
-            and "/documents/" in display_uri
+            and "/sources/" not in display_uri
+            and len(filename) == 7
+            and filename[:4].isdigit()
+            and filename.endswith(".md")
         )
 
     async def _rerank_scores(

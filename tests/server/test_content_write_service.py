@@ -607,9 +607,15 @@ async def test_resource_write_updates_target_and_queues_refresh_before_return(mo
     assert lock_manager.release_calls == ["lock-1"]
 
 
+@pytest.mark.parametrize(
+    "file_uri",
+    [
+        "viking://wiki/nodes/topic/card.md",
+        "viking://wiki/nodes/topic/sources/paper.ref.json",
+    ],
+)
 @pytest.mark.asyncio
-async def test_wiki_write_skips_semantic_sidecars(monkeypatch):
-    file_uri = "viking://wiki/nodes/topic/node.md"
+async def test_wiki_auxiliary_write_skips_semantic_sidecars(monkeypatch, file_uri):
     root_uri = "viking://wiki/nodes/topic"
     ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
     viking_fs = _FakeVikingFS(file_uri=file_uri, root_uri=root_uri)
@@ -645,8 +651,8 @@ async def test_wiki_write_skips_semantic_sidecars(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wiki_node_document_write_enqueues_embedding_without_semantic_sidecars(monkeypatch):
-    file_uri = "viking://wiki/nodes/topic/documents/0001.md"
-    root_uri = "viking://wiki/nodes/topic/documents"
+    file_uri = "viking://wiki/nodes/science/topic/0001.md"
+    root_uri = "viking://wiki/nodes/science/topic"
     ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.USER)
     viking_fs = _FakeVikingFS(file_uri=file_uri, root_uri=root_uri)
     vikingdb = _FakeVikingDB()
@@ -667,6 +673,7 @@ async def test_wiki_node_document_write_enqueues_embedding_without_semantic_side
     result = await coordinator.write(
         uri=file_uri,
         content="# Topic\n\nHigh-level wiki knowledge.",
+        abstract="Retrieval systems\nGrounded generation",
         ctx=ctx,
         mode="replace",
         wait=False,
@@ -681,6 +688,7 @@ async def test_wiki_node_document_write_enqueues_embedding_without_semantic_side
     assert embedding_msg.context_data["context_type"] == "resource"
     assert embedding_msg.context_data["category"] == "wiki"
     assert embedding_msg.context_data["level"] == 2
+    assert embedding_msg.context_data["abstract"] == "Retrieval systems\nGrounded generation"
     assert embedding_msg.context_data["meta"] == {"asset_type": "wiki_node_document"}
     assert result["semantic_status"] == "skipped"
     assert result["vector_status"] == "queued"

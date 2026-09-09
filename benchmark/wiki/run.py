@@ -115,8 +115,25 @@ def main():
     parser.add_argument("--config", default=default_config_path,
                         help=f"Path to config file. Default: {default_config_path}")
 
-    parser.add_argument("--step", choices=["all", "import", "build_wiki", "gen", "eval", "gen+eval", "del"], default="all",
-                        help="Execution step: 'import', 'build_wiki', 'gen', 'eval', 'gen+eval', 'del', or 'all'")
+    parser.add_argument(
+        "--step",
+        choices=[
+            "all",
+            "import",
+            "build_wiki",
+            "build_wiki_cards",
+            "build_wiki_nodes",
+            "gen",
+            "eval",
+            "gen+eval",
+            "del",
+        ],
+        default="all",
+        help=(
+            "Execution step: 'import', 'build_wiki', 'build_wiki_cards', "
+            "'build_wiki_nodes', 'gen', 'eval', 'gen+eval', 'del', or 'all'"
+        ),
+    )
 
     parser.add_argument("--ov-conf", type=str, default=None,
                         help="Path to ov.conf file (default: benchmark/wiki/ov.conf)")
@@ -224,7 +241,7 @@ def main():
         needs_vector_store = (
             mode == BASELINE_MODE
             or will_import
-            or args.step == "build_wiki"
+            or args.step in {"build_wiki", "build_wiki_cards", "build_wiki_nodes"}
             or (args.step == "all" and build_wiki_enabled)
             or args.step == "del"
         )
@@ -276,6 +293,14 @@ def main():
             logger.info("Stage: Build Wiki")
             pipeline.run_build_wiki()
 
+        if args.step == "build_wiki_cards":
+            logger.info("Stage: Build Wiki Cards")
+            pipeline.run_build_wiki(build_stage="cards")
+
+        if args.step == "build_wiki_nodes":
+            logger.info("Stage: Build Wiki Nodes")
+            pipeline.run_build_wiki(build_stage="nodes")
+
         if args.step in ["all", "gen", "gen+eval"]:
             if mode == VIKINGBOT_MODE and pipeline.db is not None:
                 pipeline.db.close()
@@ -301,6 +326,12 @@ def main():
         print(f"\n[Fatal Error] Program execution error: {str(e)}")
         sys.exit(1)
     finally:
+        if 'pipeline' in locals() and pipeline.db is not None:
+            try:
+                pipeline.db.close()
+            except Exception as e:
+                if 'logger' in locals():
+                    logger.warning(f"Failed to close vector store cleanly: {e}")
         stop_openviking_server()
 
 if __name__ == "__main__":

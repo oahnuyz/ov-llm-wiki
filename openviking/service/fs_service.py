@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 
 _WIKI_NODES_URI = "viking://wiki/nodes"
 _WIKI_NODES_JSON_URI = "viking://wiki/nodes.json"
+_WIKI_NODE_INDEX_URI = "viking://wiki/node_index.json"
 _WIKI_SOURCE_ASSIGNMENTS_URI = "viking://wiki/source_assignments.json"
 
 
@@ -54,23 +55,20 @@ def _is_wiki_node_grep_uri(uri: str | None) -> bool:
     if not normalized.startswith(prefix):
         return False
     remainder = normalized[len(prefix) :]
-    return bool(remainder) and "/" not in remainder
-
-
-def _is_wiki_node_ls_uri(uri: str | None) -> bool:
-    normalized = _normalize_uri(uri)
-    if normalized == _WIKI_NODES_URI:
-        return True
-    prefix = f"{_WIKI_NODES_URI}/"
-    if not normalized.startswith(prefix):
-        return False
-    remainder = normalized[len(prefix) :]
-    return bool(remainder) and "/" not in remainder
+    parts = [part for part in remainder.split("/") if part]
+    return bool(parts) and "sources" not in parts and "." not in parts[-1]
 
 
 def _is_wiki_document_uri(uri: str | None) -> bool:
     normalized = _normalize_uri(uri)
-    return normalized.startswith(f"{_WIKI_NODES_URI}/") and "/documents" in normalized
+    filename = normalized.rsplit("/", 1)[-1]
+    return (
+        normalized.startswith(f"{_WIKI_NODES_URI}/")
+        and "/sources/" not in normalized
+        and len(filename) == 7
+        and filename[:4].isdigit()
+        and filename.endswith(".md")
+    )
 
 
 def _wiki_node_id_from_uri(uri: str) -> str | None:
@@ -81,8 +79,14 @@ def _wiki_node_id_from_uri(uri: str) -> str | None:
     if not normalized.startswith(prefix):
         return None
     remainder = normalized[len(prefix) :]
-    node_id = remainder.split("/", 1)[0]
-    return node_id or None
+    parts = [part for part in remainder.split("/") if part]
+    if "sources" in parts:
+        parts = parts[: parts.index("sources")]
+    elif parts and "." in parts[-1]:
+        parts = parts[:-1]
+    if not parts:
+        return None
+    return parts[-1]
 
 
 def _wiki_subtree_node_ids(
@@ -190,33 +194,13 @@ def _relative_uri_path(uri: str, root_uri: str) -> str:
     return normalized_uri
 
 
-def _wiki_node_entry(node_id: str, node: dict[str, Any] | None, output: str) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "name": node_id,
-        "uri": f"{_WIKI_NODES_URI}/{node_id}",
-        "isDir": True,
-        "size": 0,
-    }
-    title = node.get("title") if node else None
-    if title:
-        entry["title"] = str(title)
-        if output == "agent":
-            entry["abstract"] = str(title)
-    elif output == "agent":
-        entry["abstract"] = ""
-    return entry
-
-
-def _wiki_documents_entry(node_id: str, output: str) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "name": "documents",
-        "uri": f"{_WIKI_NODES_URI}/{node_id}/documents",
-        "isDir": True,
-        "size": 0,
-    }
-    if output == "agent":
-        entry["abstract"] = "Wiki node knowledge documents"
-    return entry
+def _wiki_primary_uri(node_id: str, node_index: dict[str, Any]) -> str:
+    index_entry = node_index.get(node_id)
+    if isinstance(index_entry, dict):
+        primary_uri = _normalize_uri(str(index_entry.get("primary_uri") or ""))
+        if primary_uri:
+            return primary_uri
+    return f"{_WIKI_NODES_URI}/{node_id}"
 
 
 def _filter_wiki_document_matches(matches: list[Any]) -> list[Any]:
@@ -224,11 +208,7 @@ def _filter_wiki_document_matches(matches: list[Any]) -> list[Any]:
     for match in matches:
         match_uri = match.get("uri", "") if isinstance(match, dict) else getattr(match, "uri", "")
         normalized_match_uri = _normalize_uri(str(match_uri or ""))
-        if (
-            normalized_match_uri.startswith(f"{_WIKI_NODES_URI}/")
-            and "/documents/" in normalized_match_uri
-            and normalized_match_uri.endswith(".md")
-        ):
+        if _is_wiki_document_uri(normalized_match_uri):
             filtered.append(match)
     return filtered
 
@@ -312,20 +292,6 @@ class FSService:
         viking_fs = self._ensure_initialized()
         uri = validate_viking_uri(uri)
 
-        if not recursive and _is_wiki_node_ls_uri(uri):
-            entries = await self._wiki_node_ls_entries(
-                viking_fs,
-                uri,
-                ctx,
-                output=output,
-                node_limit=node_limit,
-                sort_by=sort_by,
-                sort_order=sort_order,
-            )
-            if simple:
-                return [entry.get("uri", "") for entry in entries]
-            return entries
-
         if simple:
             # Only return URIs — skip expensive abstract fetching to save tokens
             if recursive:
@@ -370,49 +336,6 @@ class FSService:
                 sort_by=sort_by,
                 sort_order=sort_order,
             )
-        return entries
-
-    async def _wiki_node_ls_entries(
-        self,
-        viking_fs: VikingFS,
-        uri: str,
-        ctx: RequestContext,
-        *,
-        output: str,
-        node_limit: int,
-        sort_by: Optional[str],
-        sort_order: str,
-    ) -> list[dict[str, Any]]:
-        if output not in {"original", "agent"}:
-            raise ValueError(f"Invalid output format: {output}")
-        if sort_order not in {"asc", "desc"}:
-            raise ValueError("sort_order must be 'asc' or 'desc'")
-
-        normalized = _normalize_uri(uri)
-        nodes = await self._read_wiki_nodes(viking_fs, ctx)
-        nodes_by_id = {str(node.get("node_id")): node for node in nodes if node.get("node_id")}
-        target_node_id = _wiki_node_id_from_uri(normalized)
-        child_node_ids = _wiki_direct_child_node_ids(nodes, target_node_id)
-
-        entries: list[dict[str, Any]] = []
-        if target_node_id:
-            entries.append(_wiki_documents_entry(target_node_id, output))
-        entries.extend(
-            _wiki_node_entry(node_id, nodes_by_id.get(node_id), output)
-            for node_id in child_node_ids
-            if node_id in nodes_by_id
-        )
-
-        if sort_by == "name":
-            entries.sort(
-                key=lambda entry: (str(entry.get("name", "")).lower(), str(entry.get("name", ""))),
-                reverse=sort_order == "desc",
-            )
-        elif sort_by not in {None, "mtime"}:
-            raise ValueError("sort_by must be 'name' or 'mtime'")
-
-        if node_limit is not None and node_limit > 0:
-            return entries[:node_limit]
         return entries
 
     async def mkdir(
@@ -810,18 +733,40 @@ class FSService:
             return [uri]
 
         nodes = await self._read_wiki_nodes(viking_fs, ctx)
+        node_index = await self._read_wiki_node_index(viking_fs, ctx)
         target_node_id = _wiki_node_id_from_uri(normalized)
         node_ids = _wiki_subtree_node_ids(nodes, target_node_id)
         if not node_ids and target_node_id:
             node_ids = [target_node_id]
 
-        return [f"{_WIKI_NODES_URI}/{node_id}/documents/" for node_id in node_ids]
+        document_uris: list[str] = []
+        for node_id in node_ids:
+            index_entry = node_index.get(node_id)
+            indexed_documents = (
+                index_entry.get("document_uris") if isinstance(index_entry, dict) else None
+            )
+            if isinstance(indexed_documents, list) and indexed_documents:
+                document_uris.extend(str(item) for item in indexed_documents if item)
+            else:
+                document_uris.append(f"{_wiki_primary_uri(node_id, node_index)}/0001.md")
+        return list(dict.fromkeys(document_uris))
 
     async def _read_wiki_nodes(self, viking_fs: VikingFS, ctx: RequestContext) -> list[dict[str, Any]]:
         content = await viking_fs.read_file(_WIKI_NODES_JSON_URI, ctx=ctx)
         payload = json.loads(content)
         nodes = payload.get("nodes") if isinstance(payload, dict) else payload
         return [node for node in nodes or [] if isinstance(node, dict)]
+
+    async def _read_wiki_node_index(
+        self, viking_fs: VikingFS, ctx: RequestContext
+    ) -> dict[str, Any]:
+        try:
+            content = await viking_fs.read_file(_WIKI_NODE_INDEX_URI, ctx=ctx)
+        except (NotFoundError, FileNotFoundError, KeyError):
+            return {}
+        payload = json.loads(content)
+        nodes = payload.get("nodes") if isinstance(payload, dict) else None
+        return nodes if isinstance(nodes, dict) else {}
 
     async def _read_wiki_source_assignments(
         self, viking_fs: VikingFS, ctx: RequestContext

@@ -4,6 +4,7 @@ from openviking.wiki.assignments import SourceRefBuilder
 from openviking.wiki.config import WikiConfig
 from openviking.wiki.schemas import (
     DocumentCard,
+    NodeCard,
     SourceAssignmentItem,
 )
 
@@ -33,6 +34,7 @@ def test_source_ref_builder_binds_wiki_node_cards():
         "viking://wiki/nodes/child_a/card.md",
         "viking://wiki/nodes/child_b/card.md",
     ]
+    assert [ref.matched_topics for ref in refs] == [["Parent topic."], ["Parent topic."]]
 
 
 def test_source_ref_builder_binds_document_source_ids():
@@ -77,17 +79,15 @@ def _card(doc_id: str) -> DocumentCard:
         resource_uri=f"viking://resources/{doc_id}/",
         title=f"Paper {doc_id}",
         summary="QA summary.",
-        main_points=["QA"],
         candidate_topics=["question answering"],
     )
 
 
-def _node_card(node_id: str) -> DocumentCard:
-    return DocumentCard(
+def _node_card(node_id: str) -> NodeCard:
+    return NodeCard(
         doc_id=node_id,
         resource_uri=f"viking://wiki/nodes/{node_id}/",
         title=node_id.replace("_", " ").title(),
         summary="Node summary.",
-        main_points=["Node point"],
-        candidate_topics=["Parent topic"],
+        scope="Parent topic.",
     )

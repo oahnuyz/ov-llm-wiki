@@ -3,6 +3,7 @@
 import asyncio
 import itertools
 import json
+import os
 import time
 from abc import ABC
 from pathlib import Path
@@ -107,6 +108,24 @@ class OVFileTool(Tool, ABC):
     def _is_default_root_uri(self, uri: str | None) -> bool:
         return self._normalize_uri(uri) in {"", "viking://", "viking://user"}
 
+    def _configured_retrieval_root_uri(self) -> str:
+        return self._normalize_uri(os.environ.get("VIKINGBOT_OPENVIKING_ROOT_URI"))
+
+    def _scope_retrieval_uri(self, uri: str | None) -> str:
+        """Resolve a retrieval URI inside the optional process-wide evaluation root."""
+        root_uri = self._configured_retrieval_root_uri()
+        requested_uri = self._normalize_uri(uri)
+        if not root_uri:
+            return requested_uri
+        if self._is_default_root_uri(requested_uri):
+            return root_uri
+        if requested_uri == root_uri or requested_uri.startswith(f"{root_uri}/"):
+            return requested_uri
+        raise ValueError(
+            f"URI {requested_uri!r} is outside the configured OpenViking retrieval root "
+            f"{root_uri!r}"
+        )
+
     def _peer_memory_uris(
         self,
         client: VikingClient,
@@ -136,6 +155,9 @@ class OVFileTool(Tool, ABC):
         tool_context: ToolContext,
         uri: str | None,
     ) -> list[str]:
+        if self._configured_retrieval_root_uri():
+            return [self._scope_retrieval_uri(uri)]
+
         if getattr(client, "actor_peer_id", None):
             if self._is_default_root_uri(uri):
                 return [uri or "viking://"]
@@ -165,6 +187,22 @@ class OVFileTool(Tool, ABC):
 
 class VikingListTool(OVFileTool):
     """Tool to list Viking resources."""
+
+    _WIKI_NODES_URI = "viking://wiki/nodes"
+    _HIDDEN_WIKI_CARD_NAMES = {"card.md", "card.json"}
+
+    @classmethod
+    def _is_hidden_wiki_entry(cls, entry: dict[str, Any]) -> bool:
+        """Hide Wiki implementation metadata from the Agent-facing directory view."""
+        entry_uri = cls._normalize_uri(str(entry.get("uri") or ""))
+        if not entry_uri.startswith(f"{cls._WIKI_NODES_URI}/"):
+            return False
+
+        relative_parts = entry_uri[len(cls._WIKI_NODES_URI) + 1 :].split("/")
+        return (
+            "sources" in relative_parts
+            or relative_parts[-1] in cls._HIDDEN_WIKI_CARD_NAMES
+        )
 
     @property
     def name(self) -> str:
@@ -215,6 +253,8 @@ class VikingListTool(OVFileTool):
                         raise
                     logger.debug(f"Skip OpenViking list target {target_uri}: {exc}")
                     continue
+
+            entries = [entry for entry in entries if not self._is_hidden_wiki_entry(entry)]
 
             if not entries:
                 return f"No resources found at {uri}"
@@ -410,6 +450,8 @@ class VikingSearchTool(OVFileTool):
         client = None
         try:
             client = await self._get_client(tool_context)
+            if self._configured_retrieval_root_uri():
+                target_uri = self._scope_retrieval_uri(target_uri)
             memory_owner_user_ids = getattr(tool_context, "memory_owner_user_ids", None)
             legacy_memory_user_ids = getattr(tool_context, "memory_user_ids", None)
 
@@ -594,6 +636,8 @@ class VikingGrepTool(OVFileTool):
         tool_context: ToolContext,
         uri: str | None,
     ) -> list[str]:
+        if self._configured_retrieval_root_uri():
+            return self._fs_retrieval_uris(client, tool_context, uri)
         if not self._is_default_root_uri(uri):
             return self._fs_retrieval_uris(client, tool_context, uri)
 
@@ -908,7 +952,7 @@ class VikingMultiReadTool(OVFileTool):
                 "uris": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": 'List of Viking file URIs to read from (e.g., ["viking://resources/path/123.md", "viking://wiki/nodes/topic/documents/0001.md"])',
+                    "description": 'List of Viking file URIs to read from (e.g., ["viking://resources/path/123.md", "viking://wiki/nodes/topic/0001.md"])',
                 },
             },
             "required": ["uris"],
@@ -925,6 +969,12 @@ class VikingMultiReadTool(OVFileTool):
         try:
             if not uris:
                 return "Error: No URIs provided."
+
+            if self._configured_retrieval_root_uri():
+                try:
+                    uris = [self._scope_retrieval_uri(uri) for uri in uris]
+                except ValueError as exc:
+                    return f"Error: {exc}"
 
             client = await self._get_client(tool_context)
             max_concurrent = 10

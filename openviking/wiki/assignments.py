@@ -5,6 +5,7 @@ from __future__ import annotations
 from .config import WikiConfig
 from .schemas import (
     DocumentCard,
+    NodeCard,
     SourceAssignmentItem,
     SourceRef,
 )
@@ -18,7 +19,7 @@ class SourceRefBuilder:
     def build_refs_by_node(
         self,
         assignments: list[SourceAssignmentItem],
-        cards: list[DocumentCard],
+        cards: list[DocumentCard | NodeCard],
     ) -> dict[str, list[SourceRef]]:
         cards_by_id = {card.doc_id: card for card in cards}
         refs_by_node: dict[str, list[SourceRef]] = {}
@@ -43,13 +44,17 @@ class SourceRefBuilder:
                         card_uri=card_md_uri_for_card(self.config, card),
                         title=card.title,
                         support_scope=item.support_scope,
-                        matched_topics=card.candidate_topics,
+                        matched_topics=(
+                            [card.scope]
+                            if isinstance(card, NodeCard)
+                            else card.candidate_topics
+                        ),
                     )
                 )
         return refs_by_node
 
 
-def _ref_type_for_card(card: DocumentCard) -> str:
+def _ref_type_for_card(card: DocumentCard | NodeCard) -> str:
     if card.resource_uri.startswith("viking://wiki/"):
         return "wiki_node"
     return "document"

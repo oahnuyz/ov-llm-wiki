@@ -227,6 +227,22 @@ class StructuredVLM:
         )
         return parse_json_from_response(response)
 
+    async def complete_tools_async(
+        self,
+        prompt: str = "",
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str | Dict[str, Any]] = None,
+        thinking: Optional[bool] = None,
+    ) -> Any:
+        """Return the provider response unchanged so callers can execute tool calls."""
+        effective_thinking = self._get_vlm().thinking if thinking is None else thinking
+        return await self._get_vlm().get_completion_async(
+            prompt=prompt,
+            thinking=effective_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
     def complete_model(
         self,
         prompt: str,

@@ -37,34 +37,62 @@ def nodes_dir(config: WikiConfig) -> str:
     return f"{wiki_root(config)}nodes/"
 
 
+def build_dir(config: WikiConfig) -> str:
+    return f"{wiki_root(config)}build/"
+
+
+def build_layer_dir(config: WikiConfig, depth: int) -> str:
+    return f"{build_dir(config)}layers/depth_{depth}/"
+
+
+def build_node_root_uri(config: WikiConfig, depth: int, node_id: str) -> str:
+    return f"{build_layer_dir(config, depth)}{sanitize_node_id(node_id)}/"
+
+
 def node_root_uri(config: WikiConfig, node_id: str) -> str:
     return f"{nodes_dir(config)}{sanitize_node_id(node_id)}/"
 
 
+def child_node_root_uri(parent_uri: str, node_id: str) -> str:
+    return f"{_slash(parent_uri)}{sanitize_node_id(node_id)}/"
+
+
+def node_card_md_uri_at(node_uri: str) -> str:
+    return f"{_slash(node_uri)}card.md"
+
+
+def node_card_json_uri_at(node_uri: str) -> str:
+    return f"{_slash(node_uri)}card.json"
+
+
+def node_document_uri_at(node_uri: str, document_id: str) -> str:
+    return f"{_slash(node_uri)}{document_id}.md"
+
+
+def node_sources_dir_at(node_uri: str) -> str:
+    return f"{_slash(node_uri)}sources/"
+
+
 def node_card_md_uri(config: WikiConfig, node_id: str) -> str:
-    return f"{node_root_uri(config, node_id)}card.md"
+    return node_card_md_uri_at(node_root_uri(config, node_id))
 
 
 def node_card_json_uri(config: WikiConfig, node_id: str) -> str:
-    return f"{node_root_uri(config, node_id)}card.json"
+    return node_card_json_uri_at(node_root_uri(config, node_id))
 
 
 def card_md_uri_for_card(config: WikiConfig, card) -> str:
     if str(card.resource_uri).startswith("viking://wiki/"):
-        return node_card_md_uri(config, card.doc_id)
+        return node_card_md_uri_at(str(card.resource_uri))
     return card_md_uri(config, card.doc_id)
 
 
-def node_documents_dir(config: WikiConfig, node_id: str) -> str:
-    return f"{node_root_uri(config, node_id)}documents/"
-
-
 def node_document_uri(config: WikiConfig, node_id: str, document_id: str) -> str:
-    return f"{node_documents_dir(config, node_id)}{document_id}.md"
+    return node_document_uri_at(node_root_uri(config, node_id), document_id)
 
 
 def node_sources_dir(config: WikiConfig, node_id: str) -> str:
-    return f"{node_root_uri(config, node_id)}sources/"
+    return node_sources_dir_at(node_root_uri(config, node_id))
 
 
 def run_dir(config: WikiConfig) -> str:

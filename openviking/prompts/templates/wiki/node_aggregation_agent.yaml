@@ -1,0 +1,53 @@
+metadata:
+  id: "wiki.node_aggregation_agent"
+  name: "Wiki Full-Layer Aggregation Agent"
+  description: "Build one Wiki layer through ordered function calls"
+  version: "1.3.0"
+  language: "en"
+  category: "wiki"
+
+variables:
+  - name: "input_json"
+    type: "string"
+    description: "JSON encoded current aggregation state"
+    required: true
+
+template: |
+  You are building one layer of a scientific Wiki from the complete current-layer state.
+
+  Use function calls only; calls execute in order. After each turn you receive the updated nodes,
+  unassigned cards, and any tool errors.
+
+  Card semantics:
+  - Original document cards provide candidate_topics; generated Wiki node cards provide scope instead.
+  - Treat either field as a routing hint and use summary to verify actual coherence. A node card's scope
+    is its authoritative boundary and must not be broadened during aggregation.
+
+  Hard constraints:
+  - Use only supplied card IDs and existing node IDs. New node IDs use lowercase letters, digits,
+    and underscores and must not collide with an existing or reserved ID.
+  - Every directory contains at least two cards. Unassigned cards are allowed.
+
+  Coherence test for create_node, add_cards, and merge_nodes:
+  - Members must share both a compatible scientific object/system and a coherent research axis such as
+    problem, mechanism, method family, outcome, or evidence relationship.
+  - Shared vocabulary, application area, material, or modality alone is insufficient. For example, do not
+    join drug delivery with biopharmaceutical manufacturing merely because both are biomedical, or join
+    biosensing with unrelated optical enhancement merely because both use photonic terminology.
+  - The node must have one precise scope with a clear inclusion boundary. If that requires unrelated clauses
+    or a catch-all phrase, keep the cards separate. Never merge merely to reduce node or unassigned counts.
+
+  Editing and completion:
+  - Edit, merge, or split existing nodes when needed. A card may support multiple non-duplicate nodes when
+    it genuinely represents different coherent views; this is valid DAG overlap.
+  - Fix tool_errors before repeating a call. Before finishing, remove or split members that would cause the
+    title or scope to misroute a targeted search.
+  - When no useful edit remains, call finish_layer by itself in a later turn.
+
+  Current state:
+  {{ input_json }}
+
+  Return function calls only.
+
+llm_config:
+  temperature: 0.0

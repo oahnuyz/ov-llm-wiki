@@ -43,12 +43,21 @@ def _require_source_uri(value: str) -> str:
     return value
 
 
+def _require_wiki_uri(value: str) -> str:
+    value = _require_text(value)
+    if not value.startswith("viking://wiki/"):
+        raise ValueError("resource_uri must start with viking://wiki/")
+    return value
+
+
 NonEmptyStr = Annotated[str, AfterValidator(_require_text)]
 NodeId = Annotated[str, AfterValidator(_require_node_id)]
 ResourceUri = Annotated[str, AfterValidator(_require_resource_uri)]
 OptionalResourceUri = Annotated[str, AfterValidator(_require_optional_resource_uri)]
 SourceUri = Annotated[str, AfterValidator(_require_source_uri)]
+WikiUri = Annotated[str, AfterValidator(_require_wiki_uri)]
 NonEmptyStrList = Annotated[list[str], Field(min_length=1)]
+AtLeastTwoStrList = Annotated[list[str], Field(min_length=2)]
 
 
 class StrictModel(BaseModel):
@@ -91,105 +100,94 @@ class ResourceDocument(StrictModel):
 class DocumentCardContent(StrictModel):
     """LLM 为单篇文档提炼的语义卡片内容，不包含系统已知的文档标识字段。"""
     summary: NonEmptyStr
-    main_points: NonEmptyStrList
-    important_terms: list[str] = Field(default_factory=list)
     candidate_topics: NonEmptyStrList
 
 
 class DocumentCard(DocumentCardContent):
-    """来源文档或 Wiki 节点的结构化卡片，是后续节点发现和来源分配的基础输入。"""
+    """原始来源文档的结构化卡片。"""
     doc_id: NonEmptyStr
-    resource_uri: SourceUri
+    resource_uri: ResourceUri
     title: NonEmptyStr
     markdown: str = ""
 
 
+class NodeCardContent(StrictModel):
+    """LLM 为 Wiki 节点正文生成的更具体语义描述。"""
+    summary: NonEmptyStr
+
+
+class NodeCard(NodeCardContent):
+    """Wiki 节点的结构化卡片，以节点 scope 代替候选主题。"""
+    doc_id: NodeId
+    resource_uri: WikiUri
+    title: NonEmptyStr
+    scope: NonEmptyStr
+    markdown: str = ""
+
+
 class AggregationCardView(StrictModel):
-    """聚合阶段发送给 LLM 的当前批次 card 视图。"""
+    """聚合 agent 使用的 card 语义视图。"""
     card_id: NonEmptyStr
     title: NonEmptyStr
     summary: NonEmptyStr
-    main_points: NonEmptyStrList
-    important_terms: list[str] = Field(default_factory=list)
-    candidate_topics: NonEmptyStrList
+    candidate_topics: NonEmptyStrList | None = None
+    scope: NonEmptyStr | None = None
 
 
-class CandidateMemberView(StrictModel):
-    """existing_candidates 中历史成员的精简视图。"""
-    card_id: NonEmptyStr
-    summary: NonEmptyStr
-
-
-class CandidateView(StrictModel):
-    """发送给 LLM 的当前候选节点视图。"""
-    candidate_id: NonEmptyStr
+class AggregationNodeView(StrictModel):
+    """聚合 agent 当前可编辑的目录节点及其完整成员 card。"""
+    node_id: NodeId
     title: NonEmptyStr
     scope: NonEmptyStr
-    cards: list[CandidateMemberView] = Field(min_length=1)
-    status: Literal["pending", "provisional"]
+    cards: list[AggregationCardView] = Field(min_length=2)
 
 
-class CreateCandidateOperation(StrictModel):
-    op: Literal["create_candidate"]
-    candidate_ref: NonEmptyStr
+class CreateNodeToolArgs(StrictModel):
+    node_id: NodeId
+    title: NonEmptyStr
+    scope: NonEmptyStr
+    card_ids: AtLeastTwoStrList
+
+
+class AddCardsToolArgs(StrictModel):
+    node_id: NodeId
+    card_ids: NonEmptyStrList
+
+
+class RemoveCardsToolArgs(StrictModel):
+    node_id: NodeId
+    card_ids: NonEmptyStrList
+
+
+class MergeNodesToolArgs(StrictModel):
+    target_node_id: NodeId
+    source_node_ids: NonEmptyStrList
+
+
+class SplitNodeGroup(StrictModel):
+    node_id: NodeId
     title: NonEmptyStr
     scope: NonEmptyStr
     card_ids: NonEmptyStrList
 
 
-class AssignCardsOperation(StrictModel):
-    op: Literal["assign_cards"]
-    candidate_id: NonEmptyStr
-    card_ids: NonEmptyStrList
+class SplitNodeToolArgs(StrictModel):
+    node_id: NodeId
+    groups: list[SplitNodeGroup] = Field(min_length=2)
 
 
-class RenameCandidateOperation(StrictModel):
-    op: Literal["rename_candidate"]
-    candidate_id: NonEmptyStr
+class RenameNodeToolArgs(StrictModel):
+    node_id: NodeId
     title: NonEmptyStr
 
 
-class UpdateScopeOperation(StrictModel):
-    op: Literal["update_scope"]
-    candidate_id: NonEmptyStr
+class UpdateNodeScopeToolArgs(StrictModel):
+    node_id: NodeId
     scope: NonEmptyStr
 
 
-class MergeCandidatesOperation(StrictModel):
-    op: Literal["merge_candidates"]
-    target_candidate_id: NonEmptyStr
-    source_candidate_ids: NonEmptyStrList
-
-
-class SplitCandidateGroup(StrictModel):
-    candidate_ref: NonEmptyStr
-    title: NonEmptyStr
-    scope: NonEmptyStr
-    card_ids: NonEmptyStrList
-
-
-class SplitCandidateOperation(StrictModel):
-    op: Literal["split_candidate"]
-    candidate_id: NonEmptyStr
-    groups: list[SplitCandidateGroup] = Field(min_length=2)
-
-
-CandidateOperation = Annotated[
-    Union[
-        CreateCandidateOperation,
-        AssignCardsOperation,
-        RenameCandidateOperation,
-        UpdateScopeOperation,
-        MergeCandidatesOperation,
-        SplitCandidateOperation,
-    ],
-    Field(discriminator="op"),
-]
-
-
-class CandidateOperationsResponse(StrictModel):
-    """LLM 聚合步骤的严格操作响应。"""
-    operations: list[CandidateOperation]
+class FinishLayerToolArgs(StrictModel):
+    pass
 
 
 class WikiNode(StrictModel):
@@ -200,6 +198,8 @@ class WikiNode(StrictModel):
     scope: NonEmptyStr
     parent_node_ids: list[str] = Field(default_factory=list)
     child_node_ids: list[str] = Field(default_factory=list)
+    aggregation_order: int = Field(default=0, ge=0)
+    primary_parent_id: str = ""
 
 
 class SourceRef(StrictModel):
@@ -240,7 +240,7 @@ class NodeDocumentContent(StrictModel):
 
 
 class NodeDocument(NodeDocumentContent):
-    """节点目录下生成的 Markdown 文档内容，最终会写入 documents/*.md。"""
+    """节点目录下生成的 Markdown 正文，最终会直接写成 0001.md 等文件。"""
     document_id: NonEmptyStr
 
 
@@ -252,14 +252,14 @@ class NodeDocumentsResponse(StrictModel):
 class GeneratedNodeContext(StrictModel):
     """单个节点生成完成后的内存上下文，汇总节点 card、正文文档和来源。"""
     node: WikiNode
-    card: DocumentCard
+    card: NodeCard
     documents: list[NodeDocument]
     source_refs: list[SourceRef]
 
 
 class PipelineArtifacts(StrictModel):
     """Wiki pipeline 一次运行的内存产物集合，用于串联各阶段输出。"""
-    cards: list[DocumentCard] = Field(default_factory=list)
+    cards: list[Union[DocumentCard, NodeCard]] = Field(default_factory=list)
     nodes: list[WikiNode] = Field(default_factory=list)
     source_refs_by_node: dict[str, list[SourceRef]] = Field(default_factory=dict)
     node_contexts: list[GeneratedNodeContext] = Field(default_factory=list)

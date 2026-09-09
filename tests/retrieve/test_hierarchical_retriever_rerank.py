@@ -208,7 +208,7 @@ class ChannelSearchStorage(DummyStorage):
         if targets and all(target.startswith("viking://wiki") for target in targets):
             return [
                 _result(
-                    "/wiki/nodes/steam/documents/0001.md",
+                    "/wiki/nodes/steam/0001.md",
                     0.95,
                     abstract="wiki document",
                 )
@@ -725,11 +725,11 @@ async def test_convert_to_matched_contexts_returns_viking_uri_for_index_path():
     )
 
     result = await retriever._convert_to_matched_contexts(
-        [_result("/wiki/nodes/steam/documents/0001.md", 1.0, abstract="wiki doc")],
+        [_result("/wiki/nodes/steam/0001.md", 1.0, abstract="wiki doc")],
         ctx=_ctx(),
     )
 
-    assert result[0].uri == "viking://wiki/nodes/steam/documents/0001.md"
+    assert result[0].uri == "viking://wiki/nodes/steam/0001.md"
 
 
 @pytest.mark.asyncio
@@ -744,7 +744,7 @@ async def test_global_retrieve_merges_resource_recursion_and_wiki_document_chann
     result = await retriever.retrieve(_query(), ctx=_ctx(), limit=5, mode=RetrieverMode.THINKING)
 
     assert [ctx.uri for ctx in result.matched_contexts] == [
-        "viking://wiki/nodes/steam/documents/0001.md",
+        "viking://wiki/nodes/steam/0001.md",
         "viking://resources/file",
     ]
     assert storage.search_calls[0]["target_directories"] == []
@@ -773,7 +773,7 @@ async def test_wiki_target_uses_only_wiki_document_channel():
     result = await retriever.retrieve(query, ctx=_ctx(), limit=5, mode=RetrieverMode.THINKING)
 
     assert [ctx.uri for ctx in result.matched_contexts] == [
-        "viking://wiki/nodes/steam/documents/0001.md"
+        "viking://wiki/nodes/steam/0001.md"
     ]
     assert len(storage.search_calls) == 1
     assert storage.search_calls[0]["target_directories"] == ["viking://wiki/nodes/steam"]

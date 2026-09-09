@@ -44,6 +44,7 @@ class WikiService:
         wiki_root_uri: str = "viking://wiki/",
         card_input_mode: Literal["summary", "raw_chunk"] = "summary",
         max_card_input_chars: int = 20000,
+        build_stage: Literal["all", "cards", "nodes"] = "all",
     ) -> dict[str, Any]:
         self._ensure_initialized()
         self._validate_wiki_root_uri(wiki_root_uri)
@@ -51,6 +52,8 @@ class WikiService:
             raise InvalidArgumentError("card_input_mode must be either 'summary' or 'raw_chunk'")
         if int(max_card_input_chars or 0) <= 0:
             raise InvalidArgumentError("max_card_input_chars must be positive")
+        if build_stage not in {"all", "cards", "nodes"}:
+            raise InvalidArgumentError("build_stage must be one of: all, cards, nodes")
 
         normalized_resource_uris = await self._normalize_resource_uris(resource_uris, ctx)
         wiki_inputs = await self._wiki_resource_inputs_from_uris(normalized_resource_uris, ctx)
@@ -77,6 +80,7 @@ class WikiService:
             content_loader=loader,
             card_input_mode=card_input_mode,
             max_card_input_chars=max_card_input_chars,
+            build_stage=build_stage,
         )
         return {
             "status": "success",
@@ -85,6 +89,7 @@ class WikiService:
             "nodes": len(artifacts.nodes),
             "node_contexts": len(artifacts.node_contexts),
             "card_input_mode": card_input_mode,
+            "build_stage": build_stage,
             "wiki_root_uri": wiki_root_uri,
             "resource_uris": normalized_resource_uris,
         }

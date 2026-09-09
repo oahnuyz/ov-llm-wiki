@@ -23,6 +23,7 @@ async def test_build_wiki_router_calls_service(monkeypatch):
             wiki_root_uri="viking://wiki/",
             card_input_mode="summary",
             max_card_input_chars=20000,
+            build_stage="cards",
         ),
         _ctx=object(),
     )
@@ -30,6 +31,7 @@ async def test_build_wiki_router_calls_service(monkeypatch):
     assert body["result"]["wiki_root_uri"] == "viking://wiki/"
     assert seen["resource_uris"] == ["viking://resources/demo"]
     assert seen["card_input_mode"] == "summary"
+    assert seen["build_stage"] == "cards"
 
 
 async def test_clear_wiki_router_calls_service(monkeypatch):
