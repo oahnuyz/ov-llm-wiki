@@ -6,6 +6,34 @@ from typing import List
 
 class MetricsCalculator:
     @staticmethod
+    def qa_token_usage(usage: dict) -> tuple[int, int, int]:
+        """Read cumulative QA-agent usage, including legacy zero-filled aliases.
+
+        These are generation LLM tokens across all iterations, excluding Judge,
+        ingestion, Wiki construction, and retrieval embedding usage.
+        """
+        def first_value(*keys):
+            return next((int(usage[key]) for key in keys if usage.get(key) is not None), 0)
+
+        input_tokens = first_value("prompt_tokens", "input_tokens", "total_input_tokens")
+        output_tokens = first_value("completion_tokens", "output_tokens", "llm_output_tokens")
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        return input_tokens, output_tokens, total_tokens
+
+    @staticmethod
+    def average_qa_tokens(results: list[dict]) -> dict:
+        """Match the efficiency report's successful-query denominator."""
+        usages = [
+            MetricsCalculator.qa_token_usage(result.get("token_usage") or {})
+            for result in results if result.get("generation_failed") is not True
+        ]
+        keys = ("Average Input Tokens", "Average Output Tokens", "Average Total Tokens")
+        return {
+            key: sum(usage[index] for usage in usages) / len(usages) if usages else 0
+            for index, key in enumerate(keys)
+        }
+
+    @staticmethod
     def normalize_answer(s):
         """Normalize answer text: remove punctuation, convert to lowercase, remove articles"""
         s = str(s).replace(',', "") 
@@ -29,7 +57,7 @@ class MetricsCalculator:
 
     @staticmethod
     def check_refusal(text: str) -> bool:
-        refusals = ["not mentioned", "no information", "cannot be answered", "none", "unknown", "don't know"]
+        refusals = ["not mentioned", "no information", "cannot be answered", "unknown", "don't know"]
         return any(r in text.lower() for r in refusals)
 
     @staticmethod

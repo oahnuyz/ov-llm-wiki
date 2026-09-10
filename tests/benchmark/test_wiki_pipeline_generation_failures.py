@@ -113,6 +113,11 @@ def test_generation_writes_failed_vikingbot_records_without_aborting(tmp_path, m
     assert report["Generation"]["Generation Failed Queries"] == 1
     assert report["Generation"]["Successful Queries"] == 1
     assert report["Query Efficiency (Average Per Query)"]["Average Retrieval Time (s)"] == 1.5
+    assert results[1]["token_usage"]["total_input_tokens"] == 2
+    assert results[1]["token_usage"]["llm_output_tokens"] == 3
+    assert report["Query Efficiency (Average Per Query)"]["Average Input Tokens"] == 2
+    assert report["Query Efficiency (Average Per Query)"]["Average Output Tokens"] == 3
+    assert report["Query Efficiency (Average Per Query)"]["Average Total Tokens"] == 5
 
 
 def test_vikingbot_error_result_is_recorded_as_generation_failure(tmp_path, monkeypatch):
@@ -135,6 +140,10 @@ def test_vikingbot_error_result_is_recorded_as_generation_failure(tmp_path, monk
 def test_evaluation_skips_generation_failures(tmp_path, monkeypatch):
     pipe = _make_pipeline(tmp_path)
     generated = {"results": [_generated_item(0, True), _generated_item(1, False)]}
+    generated["results"][1]["token_usage"].update(
+        prompt_tokens=100, completion_tokens=20, total_tokens=120
+    )
+    pipe._update_report({"Query Efficiency (Average Per Query)": {"Average Retrieval Time (s)": 7}})
     with open(pipe.generated_file, "w", encoding="utf-8") as f:
         json.dump(generated, f)
 
@@ -159,6 +168,12 @@ def test_evaluation_skips_generation_failures(tmp_path, monkeypatch):
     assert report["Skipped Failed Queries"] == 1
     assert report["Total Queries Evaluated"] == 1
     assert report["Performance Metrics"]["Average Recall"] == 1.0
+    assert report["Query Efficiency (Average Per Query)"] == {
+        "Average Retrieval Time (s)": 7,
+        "Average Input Tokens": 100,
+        "Average Output Tokens": 20,
+        "Average Total Tokens": 120,
+    }
 
 
 def test_evaluation_handles_all_generation_failures(tmp_path, monkeypatch):
@@ -184,3 +199,16 @@ def test_evaluation_handles_all_generation_failures(tmp_path, monkeypatch):
     assert report["Skipped Failed Queries"] == 1
     assert report["Total Queries Evaluated"] == 0
     assert report["Performance Metrics"]["Average F1 Score"] == 0
+
+
+def test_none_in_answers_keeps_judge_score(tmp_path, monkeypatch):
+    pipe = _make_pipeline(tmp_path)
+    item = _generated_item(0, False)
+    item["llm"]["final_answer"] = "None of these methods improved accuracy."
+    item["gold_answers"] = ["Nonetheless, the proposed method improved accuracy."]
+    monkeypatch.setattr(pipeline_mod, "llm_grader", lambda *args, **kwargs: {
+        "score": 1.0, "reasoning": "Contradicts reference.", "prompt_type": "judge",
+    })
+    result = pipe._process_evaluation_task(item)
+    assert result["metrics"]["Accuracy"] == 1.0
+    assert result["llm_evaluation"]["prompt_used"] == "judge"

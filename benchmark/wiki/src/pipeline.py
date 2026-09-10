@@ -180,14 +180,7 @@ class BenchmarkPipeline:
                         sum(r['retrieval']['latency_sec'] for r in successful_results) / successful_total
                         if successful_total else 0
                     ),
-                    "Average Input Tokens": (
-                        sum(r['token_usage']['total_input_tokens'] for r in successful_results) / successful_total
-                        if successful_total else 0
-                    ),
-                    "Average Output Tokens": (
-                        sum(r['token_usage']['llm_output_tokens'] for r in successful_results) / successful_total
-                        if successful_total else 0
-                    ),
+                    **MetricsCalculator.average_qa_tokens(sorted_results),
                 }
             }
         )
@@ -210,6 +203,14 @@ class BenchmarkPipeline:
             if item.get("generation_failed") is not True
         ]
         skipped_failed_count = len(items) - len(eval_items)
+        # Old generated files retain cumulative prompt/completion counts even
+        # when their legacy aliases are zero. Refresh without regenerating QA.
+        efficiency = {}
+        if os.path.exists(self.report_file):
+            with open(self.report_file, "r", encoding="utf-8") as f:
+                efficiency = json.load(f).get("Query Efficiency (Average Per Query)", {})
+        efficiency.update(MetricsCalculator.average_qa_tokens(items))
+        self._update_report({"Query Efficiency (Average Per Query)": efficiency})
         eval_results_map = {}
         task_errors = []
         
@@ -428,9 +429,7 @@ class BenchmarkPipeline:
         trace_file = self._write_vikingbot_trace(task['id'], vikingbot_result.get("trace"))
         total_time_sec = float(vikingbot_result.get("total_time_sec", 0) or 0)
         token_usage = vikingbot_result.get("token_usage", {}) or {}
-        prompt_tokens = int(token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0)
-        completion_tokens = int(token_usage.get("completion_tokens", token_usage.get("output_tokens", 0)) or 0)
-        total_tokens = int(token_usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        prompt_tokens, completion_tokens, total_tokens = MetricsCalculator.qa_token_usage(token_usage)
         return {
             "_global_index": task['id'], "sample_id": task['sample_id'], "question": qa.question,
             "gold_answers": qa.gold_answers, "category": str(qa.category), "evidence": qa.evidence,
@@ -453,8 +452,8 @@ class BenchmarkPipeline:
             },
             "metrics": {"Recall": 0.0},
             "token_usage": {
-                "total_input_tokens": 0,
-                "llm_output_tokens": 0,
+                "total_input_tokens": prompt_tokens,
+                "llm_output_tokens": completion_tokens,
                 "retrieval_embedding_tokens": 0,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
