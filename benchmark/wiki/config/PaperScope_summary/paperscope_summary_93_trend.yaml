@@ -8,8 +8,10 @@ adapter:
 execution:
   mode: "vikingbot"
   server_port: 2026
-  max_workers: 1
+  max_workers: 4
   retrieval_topk: 5
+  # Match ScholarQA-Multi: restrict QA search/read/list to synthesized Wiki nodes.
+  vikingbot_openviking_root_uri: "viking://wiki/nodes"
   max_queries: null
   skip_ingestion: false
   ingest_mode: "directory"

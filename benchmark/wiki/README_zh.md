@@ -479,6 +479,40 @@ benchmark/wiki/Output/qasper_30/wiki/traces/
 
 ### `benchmark_metrics_report.json`
 
+VikingBot 模式的平均 QA token 统计 gen 阶段每题所有 agent 轮次的生成模型用量，
+加上模型显式调用 search 的 embedding 用量，再除以成功 QA 数。
+benchmark 启动 Bot 时设置 `VIKINGBOT_AUTOMATIC_RECALL=0`，关闭自动记忆、经验召回
+（包括写工具触发的经验召回），保留模型显式调用 search；普通 Bot 默认仍启用自动召回。
+不包含入库、Wiki 构建和 eval 的 Judge 用量；失败 QA 延续原有口径，不参与平均。
+
+- `Average LLM Tokens`：平均生成模型 token。
+- `Average Embedding Tokens`：平均检索 embedding token。
+- `Average Total Tokens`：上述两部分之和。
+- `Average Input Tokens`：生成模型输入加 embedding token；输出单独记录。
+- `Queries Missing Embedding Usage`：缺少 embedding 用量的成功 QA 数。
+- `Queries Missing LLM Usage`：缺少生成模型用量的成功 QA 数。
+
+usage 整体缺失、字段缺失、`null` 或非法数值均不导致 QA 中断。缺失分项按 0，
+已有及后续有效用量继续累加；LLM `total_tokens` 缺失时使用已知输入和输出之和。
+平均值保留为数值，不再写 `null`，但有缺口时可能低估实际用量。
+每题保存 `llm_usage_complete`、`retrieval_embedding_usage_complete` 和 `usage_issues`，
+记录异常类型、缺失字段及 LLM 轮次。生成结果 summary 的 `incomplete_usage_qa_ids`
+列出异常 QA 编号，报告的 `Token Usage Issues` 保存明细；本次命令的所有阶段结束后输出 ERROR 汇总，
+不因统计缺失阻止后续 eval。search 的服务端 embedding usage 缺失也通过 telemetry 传回。
+
+每题 `token_usage` 的 `prompt_tokens` / `completion_tokens` 保留生成模型分项，
+`llm_total_tokens` 保存生成模型总量，`retrieval_embedding_tokens` 保存 embedding，
+benchmark 的 `total_tokens` 保存两部分合计。VikingBot 原始 JSON 的 `total_tokens`
+保留生成模型口径；LLM 与 embedding 的合计统一由 benchmark 计算。
+单独执行 eval 只更新评测结果，保留 gen 的 token 和耗时。
+Accuracy 由 Judge 决定，不再通过拒答关键词（如 `unknown`）强制改为满分。
+`Average Retrieval Time (s)` 在 VikingBot 模式下沿用 Bot 返回的平均处理耗时，
+未包含外层目录加载、进程启动等开销。
+
+Wiki 原始正文加载只接收 `.md`、`.markdown` 和 `.txt`（不区分大小写）。PNG、PDF
+等附件在读取及预算分配前排除；入库附件和 summary 模式保持原有处理方式。
+原有正文字符预算及文本截断规则保持不变。
+
 保存汇总指标，例如：
 
 ```json

@@ -39,6 +39,7 @@ from vikingbot.providers.base import LLMProvider
 from vikingbot.sandbox import SandboxManager
 from vikingbot.session.manager import Session, SessionManager
 from vikingbot.utils.helpers import cal_str_tokens, ensure_non_empty_assistant_content
+from vikingbot.utils.token_usage import record_llm_usage
 from vikingbot.utils.tracing import set_response_id, trace
 
 if TYPE_CHECKING:
@@ -962,17 +963,16 @@ class AgentLoop:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "retrieval_embedding_tokens": 0,
+            "retrieval_embedding_usage_complete": True,
+            "llm_usage_complete": True,
+            "usage_issues": [],
         }
         write_exp_injected = False
         stop_tools = set(stop_tool_names or [])
 
         def accumulate_token_usage(response: Any) -> None:
-            if not response.usage:
-                return
-            cur_token = response.usage
-            token_usage["prompt_tokens"] += cur_token.get("prompt_tokens", 0)
-            token_usage["completion_tokens"] += cur_token.get("completion_tokens", 0)
-            token_usage["total_tokens"] += cur_token.get("total_tokens", 0)
+            record_llm_usage(token_usage, response.usage, iteration=iteration)
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -1081,6 +1081,7 @@ class AgentLoop:
                         memory_owner_user_ids=memory_owner_user_ids,
                         openviking_connection=openviking_connection,
                         channel_metadata=channel_metadata,
+                        token_usage=token_usage,
                     )
                     tool_execute_duration = (time.time() - tool_execute_start_time) * 1000
                     return idx, tool_call, result, tool_execute_duration

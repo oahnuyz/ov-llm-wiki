@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from openviking.telemetry import tracer
 from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
+from openviking.utils.token_usage import parse_llm_usage, token_count
 from openviking_cli.utils import get_logger
 
 try:
@@ -156,13 +157,12 @@ class OpenAIVLM(VLMBase):
     ):
         if hasattr(response, "usage") and response.usage:
             tracer.info(f"response.usage={response.usage}")
-            prompt_tokens = response.usage.prompt_tokens
-            completion_tokens = response.usage.completion_tokens
-            prompt_tokens_details = getattr(response.usage, "prompt_tokens_details", None)
-            completion_tokens_details = getattr(response.usage, "completion_tokens_details", None)
-            prompt_cached_tokens = getattr(prompt_tokens_details, "cached_tokens", 0) or 0
+            usage = parse_llm_usage(response.usage)
+            prompt_tokens = token_count(usage.get("prompt_tokens")) or 0
+            completion_tokens = token_count(usage.get("completion_tokens")) or 0
+            prompt_cached_tokens = token_count(usage.get("cache_read_input_tokens")) or 0
             completion_reasoning_tokens = (
-                getattr(completion_tokens_details, "reasoning_tokens", 0) or 0
+                token_count(usage.get("reasoning_tokens")) or 0
             )
             self.update_token_usage(
                 model_name=self.model or "gpt-4o-mini",
@@ -198,14 +198,7 @@ class OpenAIVLM(VLMBase):
         message = choice.message
         tracer.info(f"result={message.content}")
         if has_tools:
-            usage = {}
-            if hasattr(response, "usage") and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None),
-                }
+            usage = parse_llm_usage(getattr(response, "usage", None), include_details=True)
 
             return VLMResponse(
                 content=message.content,

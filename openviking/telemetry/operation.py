@@ -258,6 +258,9 @@ class TelemetrySummaryBuilder:
         }
         if stage_token_summary:
             summary["tokens"]["stages"] = stage_token_summary
+        missing_embedding = cls._i(counters.get("tokens.embedding.usage_missing"), 0)
+        if missing_embedding:
+            summary["tokens"]["embedding"]["usage_missing"] = missing_embedding
 
         if cls._has_metric_prefix("queue", counters, gauges):
             summary["queue"] = {

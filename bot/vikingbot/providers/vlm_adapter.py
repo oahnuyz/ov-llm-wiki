@@ -13,6 +13,7 @@ from typing import Any
 from loguru import logger
 
 from openviking.utils.model_retry import is_retryable_rate_limit_error, rate_limit_retry_delay
+from openviking.utils.token_usage import parse_llm_usage
 from vikingbot.integrations.langfuse import LangfuseClient
 from vikingbot.providers.base import (
     LLMProvider,
@@ -271,40 +272,8 @@ class VLMProviderAdapter(LLMProvider):
                 attempt += 1
 
     @staticmethod
-    def _usage_value(usage: Any, name: str) -> int:
-        if isinstance(usage, dict):
-            return int(usage.get(name, 0) or 0)
-        return int(getattr(usage, name, 0) or 0)
-
-    @classmethod
-    def _parse_usage(cls, raw_usage: Any) -> dict[str, int]:
-        if not raw_usage:
-            return {}
-
-        usage = {
-            "prompt_tokens": cls._usage_value(raw_usage, "prompt_tokens"),
-            "completion_tokens": cls._usage_value(raw_usage, "completion_tokens"),
-            "total_tokens": cls._usage_value(raw_usage, "total_tokens"),
-        }
-        prompt_details = (
-            raw_usage.get("prompt_tokens_details")
-            if isinstance(raw_usage, dict)
-            else getattr(raw_usage, "prompt_tokens_details", None)
-        )
-        completion_details = (
-            raw_usage.get("completion_tokens_details")
-            if isinstance(raw_usage, dict)
-            else getattr(raw_usage, "completion_tokens_details", None)
-        )
-        cached = cls._usage_value(prompt_details, "cached_tokens") if prompt_details else 0
-        reasoning = (
-            cls._usage_value(completion_details, "reasoning_tokens") if completion_details else 0
-        )
-        if cached:
-            usage["cache_read_input_tokens"] = cached
-        if reasoning:
-            usage["reasoning_tokens"] = reasoning
-        return usage
+    def _parse_usage(raw_usage: Any) -> dict[str, Any]:
+        return parse_llm_usage(raw_usage)
 
     def _record_vlm_usage(self, usage: dict[str, int], duration_seconds: float) -> None:
         update_token_usage = getattr(self._vlm, "update_token_usage", None)

@@ -147,6 +147,7 @@ class ToolRegistry:
         memory_user_ids: list[str] | None = None,
         openviking_connection: dict[str, Any] | None = None,
         channel_metadata: dict[str, Any] | None = None,
+        token_usage: dict[str, Any] | None = None,
     ) -> str:
         """
         Execute a tool by name with given parameters.
@@ -185,6 +186,7 @@ class ToolRegistry:
             memory_user_ids=memory_user_ids,
             openviking_connection=openviking_connection,
             channel_metadata=dict(channel_metadata or {}),
+            token_usage=token_usage,
         )
 
         # Langfuse tool call tracing - automatic for all tools

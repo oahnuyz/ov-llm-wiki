@@ -159,12 +159,17 @@ class BenchmarkPipeline:
         sorted_results = [results_map[i] for i in sorted(results_map.keys())]
         successful_results = [r for r in sorted_results if r.get("generation_failed") is not True]
         failed_count = len(sorted_results) - len(successful_results)
+        usage_errors = [
+            {"qa_id": r['_global_index'], "sample_id": r['sample_id'], "issues": issues}
+            for r in sorted_results if (issues := MetricsCalculator.usage_issues(r))
+        ]
         dataset_name = self.config.get('dataset_name', 'Unknown_Dataset')
         save_data = {
             "summary": {
                 "dataset": dataset_name,
                 "total_queries": len(sorted_results),
                 "generation_failed_queries": failed_count,
+                "incomplete_usage_qa_ids": [r["qa_id"] for r in usage_errors],
             },
             "results": sorted_results
         }
@@ -175,6 +180,7 @@ class BenchmarkPipeline:
                     "Generation Failed Queries": failed_count,
                     "Successful Queries": successful_total,
                 },
+                "Token Usage Issues": usage_errors,
                 "Query Efficiency (Average Per Query)": {
                     "Average Retrieval Time (s)": (
                         sum(r['retrieval']['latency_sec'] for r in successful_results) / successful_total
@@ -186,6 +192,21 @@ class BenchmarkPipeline:
         )
         with open(self.generated_file, "w", encoding="utf-8") as f:
             json.dump(save_data, f, indent=2, ensure_ascii=False)
+
+    def log_usage_issues(self):
+        """Emit the persisted gen warnings after the requested experiment stages finish."""
+        if not os.path.exists(self.report_file):
+            return
+        with open(self.report_file, encoding="utf-8") as f:
+            usage_errors = json.load(f).get("Token Usage Issues") or []
+        if usage_errors:
+            self.logger.error(
+                "Benchmark completed with incomplete gen token usage for %d QA(s), QA IDs=%s. "
+                "Missing usage counted as 0; known usage retained. Token averages may be "
+                "underestimated; answers and evaluation are unaffected by usage metadata. Details: %s",
+                len(usage_errors), [r["qa_id"] for r in usage_errors],
+                json.dumps(usage_errors, ensure_ascii=False),
+            )
 
     def run_evaluation(self):
         """Step 4: Evaluation"""
@@ -203,14 +224,7 @@ class BenchmarkPipeline:
             if item.get("generation_failed") is not True
         ]
         skipped_failed_count = len(items) - len(eval_items)
-        # Old generated files retain cumulative prompt/completion counts even
-        # when their legacy aliases are zero. Refresh without regenerating QA.
-        efficiency = {}
-        if os.path.exists(self.report_file):
-            with open(self.report_file, "r", encoding="utf-8") as f:
-                efficiency = json.load(f).get("Query Efficiency (Average Per Query)", {})
-        efficiency.update(MetricsCalculator.average_qa_tokens(items))
-        self._update_report({"Query Efficiency (Average Per Query)": efficiency})
+        # Evaluation leaves generation efficiency intact.
         eval_results_map = {}
         task_errors = []
         
@@ -271,6 +285,7 @@ class BenchmarkPipeline:
                 ),
             }
         })
+
 
     def run_deletion(self):
         """Step 5: Cleanup"""
@@ -375,9 +390,6 @@ class BenchmarkPipeline:
 
             ans = str(vikingbot_result.get("answer", "") or "")
             stripped_ans = ans.strip()
-            token_usage = vikingbot_result.get("token_usage", {}) or {}
-            prompt_tokens = int(token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0)
-            completion_tokens = int(token_usage.get("completion_tokens", token_usage.get("output_tokens", 0)) or 0)
             if (
                 not stripped_ans
                 or stripped_ans.startswith("[ERROR]")
@@ -404,7 +416,7 @@ class BenchmarkPipeline:
                 generation_failed=False,
                 failure_reason="",
             )
-            self.monitor.worker_end(tokens=prompt_tokens + completion_tokens)
+            self.monitor.worker_end(tokens=result["token_usage"]["total_tokens"])
 
             self.logger.info(
                 f"[Query-{task['id']}] VikingBot | "
@@ -429,7 +441,14 @@ class BenchmarkPipeline:
         trace_file = self._write_vikingbot_trace(task['id'], vikingbot_result.get("trace"))
         total_time_sec = float(vikingbot_result.get("total_time_sec", 0) or 0)
         token_usage = vikingbot_result.get("token_usage", {}) or {}
-        prompt_tokens, completion_tokens, total_tokens = MetricsCalculator.qa_token_usage(token_usage)
+        input_tokens, completion_tokens, total_tokens = MetricsCalculator.qa_token_usage(token_usage)
+        embedding_tokens = int(token_usage.get("retrieval_embedding_tokens") or 0)
+        prompt_tokens = input_tokens - embedding_tokens
+        embedding_complete = MetricsCalculator.embedding_usage_complete({
+            "token_usage": token_usage,
+            "vikingbot": vikingbot_result,
+        })
+        raw_record = {"token_usage": token_usage, "vikingbot": vikingbot_result}
         return {
             "_global_index": task['id'], "sample_id": task['sample_id'], "question": qa.question,
             "gold_answers": qa.gold_answers, "category": str(qa.category), "evidence": qa.evidence,
@@ -452,9 +471,13 @@ class BenchmarkPipeline:
             },
             "metrics": {"Recall": 0.0},
             "token_usage": {
-                "total_input_tokens": prompt_tokens,
+                "total_input_tokens": input_tokens,
                 "llm_output_tokens": completion_tokens,
-                "retrieval_embedding_tokens": 0,
+                "retrieval_embedding_tokens": embedding_tokens,
+                "retrieval_embedding_usage_complete": embedding_complete,
+                "llm_usage_complete": MetricsCalculator.llm_usage_complete(raw_record),
+                "usage_issues": MetricsCalculator.usage_issues(raw_record),
+                "llm_total_tokens": total_tokens - embedding_tokens,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
@@ -508,12 +531,6 @@ class BenchmarkPipeline:
         except Exception as e:
             self.logger.error(f"Grader error: {e}")
             
-        if MetricsCalculator.check_refusal(ans) and any(MetricsCalculator.check_refusal(gt) for gt in golds):
-            f1 = 1.0
-            eval_record["score"] = 4.0
-            eval_record["reasoning"] = "System successfully identified Unanswerable/Refusal condition."
-            eval_record["prompt_type"] = "Heuristic_Refusal_Check"
-
         acc = eval_record["score"]
 
         item["metrics"].update({"F1": f1, "Accuracy": acc})

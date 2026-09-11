@@ -16,7 +16,6 @@ from openviking.models.embedder.base import (
     EmbedResult,
     truncate_and_normalize,
 )
-from openviking.telemetry import get_current_telemetry
 from openviking.utils.async_client_cache import LoopScopedAsyncClientCache
 from openviking_cli.utils.logger import default_logger as logger
 
@@ -119,33 +118,9 @@ class DashScopeDenseEmbedder(DenseEmbedderBase):
                 body: Dict[str, Any] = response.json() if callable(response.json) else response.json
                 usage = body.get("usage")
             except Exception:
-                return
+                usage = None
 
-        if not usage:
-            return
-
-        def _val(key: str, default: int = 0) -> int:
-            if isinstance(usage, dict):
-                return int(usage.get(key, default) or default)
-            return int(getattr(usage, key, default) or default)
-
-        prompt_tokens = _val("prompt_tokens") or _val("input_tokens", 0)
-        total_tokens = _val("total_tokens", prompt_tokens)
-        completion_tokens = max(total_tokens - prompt_tokens, 0)
-
-        get_current_telemetry().add_token_usage_by_source(
-            "embedding", prompt_tokens, completion_tokens
-        )
-        self.update_token_usage(
-            model_name=self.model_name,
-            provider="dashscope",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
-
-    # ------------------------------------------------------------------
-    # Multimodal helpers
-    # ------------------------------------------------------------------
+        self._record_response_token_usage(usage, "dashscope")
 
     def _multimodal_params(self) -> Dict[str, Any]:
         """Build parameters dict for multimodal requests, excluding None values."""

@@ -9,6 +9,17 @@ from openviking_sdk.errors import NotFoundError
 
 
 @pytest.mark.asyncio
+async def test_search_preserves_request_telemetry():
+    client = AsyncHTTPClient(url="http://localhost:1933")
+    client._request = AsyncMock(return_value=object())
+    telemetry = {"summary": {"tokens": {"embedding": {"total": 7}}}}
+    client._handle_response_data = lambda _: {"result": {"resources": []}, "telemetry": telemetry}
+    result = await client.search("test", telemetry=True)
+    assert result["telemetry"] == telemetry
+    assert client._request.call_args.kwargs["json"]["telemetry"] is True
+
+
+@pytest.mark.asyncio
 async def test_async_http_client_initialize_forwards_event_hooks():
     async def request_hook(_request):
         return None

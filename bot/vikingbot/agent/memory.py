@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -53,6 +54,7 @@ class MemoryStore:
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
         self._config = config
+        self.automatic_recall_enabled = os.environ.get("VIKINGBOT_AUTOMATIC_RECALL", "1") != "0"
 
     def _get_config(self) -> "Config":
         if self._config is None:
@@ -538,6 +540,8 @@ class MemoryStore:
         user_ids: list[str] | None = None,
         openviking_connection: dict[str, Any] | None = None,
     ) -> str:
+        if not self.automatic_recall_enabled:
+            return ""
         client = None
         read_clients: dict[str, VikingClient] = {}
         try:
@@ -694,6 +698,8 @@ class MemoryStore:
             (formatted_content, recalled_uris) — 格式化后的记忆块和实际命中的 URI 列表。
             无命中时返回 ("", [])。
         """
+        if not self.automatic_recall_enabled:
+            return "", []
         if case_lookup:
             return await self._get_linked_case_experience_content(
                 query=query,

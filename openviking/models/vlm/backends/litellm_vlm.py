@@ -17,6 +17,7 @@ from litellm import acompletion, completion
 
 from openviking.telemetry import tracer
 from openviking.utils.model_retry import retry_async, retry_sync
+from openviking.utils.token_usage import parse_llm_usage, token_count
 from openviking_cli.utils import get_logger
 
 from ..base import ToolCall, VLMBase, VLMResponse
@@ -362,14 +363,7 @@ class LiteLLMVLMProvider(VLMBase):
         message = choice.message
 
         if has_tools:
-            usage = {}
-            if hasattr(response, "usage") and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None),
-                }
+            usage = parse_llm_usage(getattr(response, "usage", None), include_details=True)
 
             return VLMResponse(
                 content=message.content,
@@ -558,8 +552,9 @@ class LiteLLMVLMProvider(VLMBase):
     ) -> None:
         """Update token usage from response."""
         if hasattr(response, "usage") and response.usage:
-            prompt_tokens = response.usage.prompt_tokens
-            completion_tokens = response.usage.completion_tokens
+            usage = parse_llm_usage(response.usage)
+            prompt_tokens = token_count(usage.get("prompt_tokens")) or 0
+            completion_tokens = token_count(usage.get("completion_tokens")) or 0
             self.update_token_usage(
                 model_name=self.model or "unknown",
                 provider=self.provider,

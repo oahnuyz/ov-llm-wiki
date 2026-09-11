@@ -325,6 +325,27 @@ class EmbedderBase(ABC):
             return 0.0
         return max(time.monotonic() - self._active_call_started_at, 0.0)
 
+    def _record_response_token_usage(self, usage: Any, provider: str) -> None:
+        """Keep usage failures separate from embedding results and expose them to search."""
+        from openviking.telemetry import get_current_telemetry
+        from openviking.utils.token_usage import token_count, usage_value
+
+        prompt = token_count(usage_value(usage, "prompt_tokens"))
+        if prompt is None:
+            prompt = token_count(usage_value(usage, "input_tokens"))
+        total = token_count(usage_value(usage, "total_tokens"))
+        telemetry = get_current_telemetry()
+        if prompt is None or total is None:
+            telemetry.increment("tokens.embedding.usage_missing")
+        prompt = prompt or 0
+        total = total if total is not None else prompt
+        output = max(total - prompt, 0)
+        telemetry.add_token_usage_by_source("embedding", prompt, output)
+        self.update_token_usage(
+            model_name=self.model_name, provider=provider,
+            prompt_tokens=prompt, completion_tokens=output,
+        )
+
     def update_token_usage(
         self,
         model_name: str,

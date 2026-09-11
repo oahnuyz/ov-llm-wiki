@@ -1,4 +1,5 @@
 import os
+import asyncio
 
 os.environ["OPENVIKING_CONFIG_FILE"] = "/tmp/openviking-missing-test.conf"
 os.environ["OPENVIKING_CLI_CONFIG_FILE"] = "/tmp/openviking-cli-missing-test.conf"
@@ -12,6 +13,38 @@ from vikingbot.agent.tools.ov_file import (
     VikingMultiReadTool,
     VikingSearchTool,
 )
+
+
+@pytest.mark.asyncio
+async def test_parallel_searches_attribute_embedding_to_each_qa(monkeypatch):
+    monkeypatch.setenv("VIKINGBOT_OPENVIKING_ROOT_URI", "viking://wiki/nodes")
+
+    class Client(FakeVikingClient):
+        async def search(self, query, **kwargs):
+            assert kwargs["telemetry"] is True
+            await asyncio.sleep(0)
+            # An empty search still consumed query embedding tokens.
+            return {"resources": [], "memories": [], "skills": [], "telemetry": {
+                "summary": {"tokens": {"embedding": {"total": int(query)}}}
+            }}
+
+    tool = FakeVikingSearchTool(Client())
+    usage_a = {"retrieval_embedding_tokens": 0, "retrieval_embedding_usage_complete": True}
+    usage_b = dict(usage_a)
+    a, b = ToolContext(token_usage=usage_a), ToolContext(token_usage=usage_b)
+    results = await asyncio.gather(tool.execute(a, "3"), tool.execute(b, "11"), tool.execute(a, "5"))
+    assert usage_a["retrieval_embedding_tokens"] == 8
+    assert usage_b["retrieval_embedding_tokens"] == 11
+    assert all("No results found" in r and "telemetry" not in r for r in results)
+
+
+@pytest.mark.asyncio
+async def test_missing_search_telemetry_is_marked_incomplete(monkeypatch):
+    monkeypatch.setenv("VIKINGBOT_OPENVIKING_ROOT_URI", "viking://wiki/nodes")
+    usage = {"retrieval_embedding_tokens": 0, "retrieval_embedding_usage_complete": True}
+    tool = FakeVikingSearchTool(FakeVikingClient())
+    await tool.execute(ToolContext(token_usage=usage), "test")
+    assert usage["retrieval_embedding_usage_complete"] is False
 
 
 class FakeVikingClient:

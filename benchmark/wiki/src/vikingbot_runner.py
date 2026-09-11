@@ -285,6 +285,8 @@ def _build_vikingbot_env(
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["OPENVIKING_CONFIG_FILE"] = ov_conf_path
+    # Benchmark retrieval comes from explicit tools, without automatic memory/experience recall.
+    env["VIKINGBOT_AUTOMATIC_RECALL"] = "0"
     if openviking_root_uri:
         env["VIKINGBOT_OPENVIKING_ROOT_URI"] = openviking_root_uri.rstrip("/")
 
@@ -575,8 +577,7 @@ class VikingBotRunner:
             result_dict = {
                 "answer": resp_json.get("text", "") or "",
                 "total_time_sec": float(resp_json.get("time_cost", time.time() - start_time)),
-                "token_usage": resp_json.get("token_usage")
-                or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "token_usage": resp_json.get("token_usage") or {},
                 "tools_used_names": resp_json.get("tools_used_names") or [],
                 "tools_used": resp_json.get("tools_used") or [],
                 "iterations_used": int(resp_json.get("total_iterations", 0) or resp_json.get("iteration", 0) or 0),

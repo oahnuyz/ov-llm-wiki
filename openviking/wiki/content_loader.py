@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from .schemas import ResourceDocument, SourceSection, WikiResourceInput
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from openviking.storage.viking_fs import VikingFS
 
 LS_ALL_NODES = 2**31 - 1
+RAW_TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 
 
 class WikiCardInputMode(str, Enum):
@@ -136,6 +138,10 @@ class WikiContentLoader:
         if self._is_hidden_semantic_file(uri):
             return
         if mode == WikiCardInputMode.RAW_CHUNK:
+            # Resource trees also contain image attachments. Filter before reading
+            # bytes and before sharing the text budget across source sections.
+            if PurePosixPath(uri).suffix.lower() not in RAW_TEXT_SUFFIXES:
+                return
             text = await self._safe_read(uri)
             if not text:
                 return

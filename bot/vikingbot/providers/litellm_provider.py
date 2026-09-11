@@ -8,6 +8,7 @@ import litellm
 from litellm import acompletion
 from loguru import logger
 
+from openviking.utils.token_usage import parse_llm_usage
 from vikingbot.integrations.langfuse import LangfuseClient
 from vikingbot.providers.base import (
     LLMProvider,
@@ -486,21 +487,8 @@ class LiteLLMProvider(LLMProvider):
             )
 
     @staticmethod
-    def _parse_usage(raw_usage: Any) -> dict[str, int]:
-        if not raw_usage:
-            return {}
-        usage = {
-            "prompt_tokens": int(getattr(raw_usage, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(raw_usage, "completion_tokens", 0) or 0),
-            "total_tokens": int(getattr(raw_usage, "total_tokens", 0) or 0),
-        }
-        details = getattr(raw_usage, "prompt_tokens_details", None)
-        cached = getattr(details, "cached_tokens", 0) if details else 0
-        if not cached:
-            cached = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
-        if cached:
-            usage["cache_read_input_tokens"] = int(cached)
-        return usage
+    def _parse_usage(raw_usage: Any) -> dict[str, Any]:
+        return parse_llm_usage(raw_usage)
 
     @staticmethod
     def _stream_tool_tokens(name: str, raw_arguments: str) -> int:
@@ -531,27 +519,7 @@ class LiteLLMProvider(LLMProvider):
                     ToolCallRequest(id=tc.id, name=tc.function.name, arguments=args, tokens=tokens)
                 )
 
-        usage = {}
-        if hasattr(response, "usage") and response.usage:
-            usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
-
-            # Extract cached tokens from various provider formats
-            # OpenAI style: prompt_tokens_details.cached_tokens
-            if hasattr(response.usage, "prompt_tokens_details"):
-                details = response.usage.prompt_tokens_details
-                if details and hasattr(details, "cached_tokens"):
-                    cached = details.cached_tokens
-                    if cached:
-                        usage["cache_read_input_tokens"] = cached
-            # Anthropic style: cache_read_input_tokens
-            elif hasattr(response.usage, "cache_read_input_tokens"):
-                cached = response.usage.cache_read_input_tokens
-                if cached:
-                    usage["cache_read_input_tokens"] = cached
+        usage = self._parse_usage(getattr(response, "usage", None))
 
         reasoning_content = getattr(message, "reasoning_content", None)
 

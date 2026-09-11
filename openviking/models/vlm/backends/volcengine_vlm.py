@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openviking.telemetry import tracer
+from openviking.utils.token_usage import parse_llm_usage
 from openviking_cli.utils import get_logger
 
 from ..base import ToolCall, VLMResponse
@@ -66,14 +67,7 @@ class VolcEngineVLM(OpenAIVLM):
         if hasattr(message, "tool_calls") and message.tool_calls:
             tracer.info(f"message.tool_calls={message.tool_calls}")
         if has_tools:
-            usage = {}
-            if hasattr(response, "usage") and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                    "prompt_tokens_details": getattr(response.usage, "prompt_tokens_details", None),
-                }
+            usage = parse_llm_usage(getattr(response, "usage", None), include_details=True)
 
             return VLMResponse(
                 content=message.content,

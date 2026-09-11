@@ -290,3 +290,38 @@ def test_rate_limit_classifier_handles_structured_sdk_errors():
     )
 
     assert is_retryable_rate_limit_error(exc)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('raw_usage', [None, SimpleNamespace(prompt_tokens=5, completion_tokens=None),
+                                      {'prompt_tokens': 5, 'completion_tokens': 'bad'}])
+async def test_nonstream_usage_gap_preserves_answer(monkeypatch, raw_usage):
+    async def create(**kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content='valid answer', tool_calls=None), finish_reason='stop',
+        )], usage=raw_usage)
+
+    vlm = OpenAIVLM({'provider': 'openai', 'model': 'test-model'})
+    monkeypatch.setattr(vlm, 'get_async_client', lambda: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    ))
+    adapter = VLMProviderAdapter(vlm, 'test-model', langfuse_client=_DisabledLangfuse())
+    response = await adapter.chat(messages=[{'role': 'user', 'content': 'hello'}])
+    assert response.content == 'valid answer'
+    assert response.finish_reason == 'stop'
+    assert 'total_tokens' not in response.usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('raw_usage', [None, SimpleNamespace(prompt_tokens=5, completion_tokens=None),
+                                      {'prompt_tokens': 5, 'completion_tokens': 'bad'}])
+async def test_stream_usage_gap_preserves_answer(raw_usage):
+    chunks = [SimpleNamespace(usage=raw_usage, choices=[SimpleNamespace(
+        finish_reason='stop', delta=SimpleNamespace(content='valid answer', reasoning_content=None),
+    )])]
+    completions = _FakeStreamingCompletions([], chunks)
+    adapter = VLMProviderAdapter(_FakeStreamingVLM(completions), 'test-model', langfuse_client=_DisabledLangfuse())
+    events = [event async for event in adapter.chat_stream(messages=[{'role': 'user', 'content': 'hello'}])]
+    assert events[-1].response.content == 'valid answer'
+    assert events[-1].response.finish_reason == 'stop'
+    assert 'total_tokens' not in events[-1].response.usage

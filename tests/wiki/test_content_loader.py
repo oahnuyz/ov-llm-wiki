@@ -47,3 +47,25 @@ class FakeVikingFS:
             "viking://resources/doc_1/a.md": "Alpha content.",
             "viking://resources/doc_1/b.md": "URI: this line is part of the document, not a section marker.",
         }[uri]
+
+
+@pytest.mark.asyncio
+async def test_binary_attachments_are_not_read_or_given_text_budget():
+    class MixedFS(FakeVikingFS):
+        async def ls(self, uri, **kwargs):
+            return [{"name": name, "uri": uri + name, "type": "file"}
+                    for name in ["body.MD", "notes.txt", "figure.png", "figure.JPG", "source.pdf"]]
+
+        async def read_file(self, uri, **kwargs):
+            if uri.endswith(("body.MD", "notes.txt")):
+                return "x" * 3000
+            pytest.fail(f"Binary attachment was read as text: {uri}")
+
+    loader = WikiContentLoader(viking_fs=MixedFS(), vikingdb=object(), ctx=object())
+    doc = await loader.load_document(
+        WikiResourceInput(doc_id="doc_1", resource_uri="viking://resources/doc_1/", title="Doc"),
+        mode=WikiCardInputMode.RAW_CHUNK, max_card_input_chars=6500,
+    )
+    assert len(doc.source_sections) == 2
+    assert all(s.content == "x" * 3000 for s in doc.source_sections)
+    assert "...(truncated)" not in doc.content_or_structure

@@ -186,8 +186,13 @@ async def test_agent_loop_passes_configured_temperature_to_provider(temp_dir: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first_usage, expected_counts, complete", [
+    ({"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}, (17, 7, 24), True),
+    (None, (7, 5, 12), False),
+    ({"prompt_tokens": 10, "completion_tokens": None}, (17, 5, 22), False),
+])
 async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
-    temp_dir: Path, monkeypatch
+    temp_dir: Path, monkeypatch, first_usage, expected_counts, complete
 ):
     monkeypatch.setattr(AgentLoop, "_register_builtin_hooks", lambda self: None)
     monkeypatch.setattr(AgentLoop, "_register_default_tools", lambda self: None)
@@ -229,7 +234,7 @@ async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
                             tokens=3,
                         ),
                     ],
-                    usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                    usage=first_usage,
                 )
             return LLMResponse(
                 content="final answer from gathered tool results",
@@ -257,6 +262,7 @@ async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
 
         async def execute(self, tool_name, arguments, **kwargs):
             self.execute_calls.append((tool_name, arguments, kwargs))
+            kwargs["token_usage"]["retrieval_embedding_tokens"] += 3
             return "tool result: useful context"
 
     provider = _ToolLimitProvider()
@@ -312,7 +318,12 @@ async def test_agent_loop_makes_final_no_tool_call_when_iteration_limit_reached(
         "tool result: useful context",
         "tool result: useful context",
     ]
-    assert token_usage == {"prompt_tokens": 17, "completion_tokens": 7, "total_tokens": 24}
+    assert (token_usage["prompt_tokens"], token_usage["completion_tokens"],
+            token_usage["total_tokens"]) == expected_counts
+    assert token_usage["retrieval_embedding_tokens"] == 9
+    assert token_usage["retrieval_embedding_usage_complete"] is True
+    assert token_usage["llm_usage_complete"] is complete
+    assert len(token_usage["usage_issues"]) == (0 if complete else 1)
 
 
 @pytest.mark.asyncio

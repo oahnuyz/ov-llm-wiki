@@ -474,3 +474,18 @@ async def test_search_with_peer_id_uses_peer_target_uri_without_forwarding_peer_
             "limit": 3,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_and_preserves_embedding_telemetry():
+    client = _client(api_key_type="user")
+    telemetry = {"summary": {"tokens": {"embedding": {"total": 8}}}}
+
+    class FakeHTTPClient:
+        async def search(self, query, **kwargs):
+            assert kwargs["telemetry"] is True
+            return {"resources": [], "memories": [], "skills": [], "telemetry": telemetry}
+
+    client.client = FakeHTTPClient()
+    result = await client.search("hello", telemetry=True)
+    assert result["telemetry"] == telemetry

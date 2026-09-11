@@ -185,7 +185,7 @@ class TestOpenAIDenseEmbedder:
         mock_telemetry = MagicMock()
 
         with patch(
-            "openviking.models.embedder.openai_embedders.get_current_telemetry",
+            "openviking.telemetry.get_current_telemetry",
             return_value=mock_telemetry,
         ):
             result = embedder.embed("Hello world")

@@ -1,5 +1,8 @@
 import json
+
+import pytest
 from types import SimpleNamespace
+from pathlib import Path
 
 from benchmark.wiki.src import pipeline as pipeline_mod
 from benchmark.wiki.src.pipeline import BenchmarkPipeline
@@ -41,7 +44,7 @@ def _vikingbot_result(answer, total_time_sec=600, token_usage=None, session_id="
     return {
         "answer": answer,
         "total_time_sec": total_time_sec,
-        "token_usage": token_usage or {},
+        "token_usage": {"retrieval_embedding_usage_complete": True, **(token_usage or {})},
         "tools_used_names": [],
         "tools_used": [],
         "iterations_used": 0,
@@ -168,12 +171,8 @@ def test_evaluation_skips_generation_failures(tmp_path, monkeypatch):
     assert report["Skipped Failed Queries"] == 1
     assert report["Total Queries Evaluated"] == 1
     assert report["Performance Metrics"]["Average Recall"] == 1.0
-    assert report["Query Efficiency (Average Per Query)"] == {
-        "Average Retrieval Time (s)": 7,
-        "Average Input Tokens": 100,
-        "Average Output Tokens": 20,
-        "Average Total Tokens": 120,
-    }
+    assert report["Query Efficiency (Average Per Query)"] == {"Average Retrieval Time (s)": 7}
+
 
 
 def test_evaluation_handles_all_generation_failures(tmp_path, monkeypatch):
@@ -201,14 +200,100 @@ def test_evaluation_handles_all_generation_failures(tmp_path, monkeypatch):
     assert report["Performance Metrics"]["Average F1 Score"] == 0
 
 
-def test_none_in_answers_keeps_judge_score(tmp_path, monkeypatch):
+@pytest.mark.parametrize("phrase", ["None", "unknown inertia", "unknowns", "not mentioned",
+                                   "no information", "cannot be answered", "don't know"])
+def test_keywords_in_answers_keep_judge_score(tmp_path, monkeypatch, phrase):
     pipe = _make_pipeline(tmp_path)
     item = _generated_item(0, False)
-    item["llm"]["final_answer"] = "None of these methods improved accuracy."
-    item["gold_answers"] = ["Nonetheless, the proposed method improved accuracy."]
+    item["llm"]["final_answer"] = f"{phrase}: the method failed."
+    item["gold_answers"] = [f"{phrase}: the proposed method improved accuracy."]
     monkeypatch.setattr(pipeline_mod, "llm_grader", lambda *args, **kwargs: {
         "score": 1.0, "reasoning": "Contradicts reference.", "prompt_type": "judge",
     })
     result = pipe._process_evaluation_task(item)
     assert result["metrics"]["Accuracy"] == 1.0
     assert result["llm_evaluation"]["prompt_used"] == "judge"
+    assert result["metrics"]["F1"] < 1.0
+
+
+def test_embedding_survives_result_serialization_and_eval_preserves_efficiency(tmp_path, monkeypatch):
+    pipe = _make_pipeline(tmp_path)
+    qa = SimpleNamespace(question="test", gold_answers=["answer"], category="test", evidence=[])
+    result = pipe._build_vikingbot_result(
+        task={"id": 0, "sample_id": "sample"}, qa=qa, ans="answer",
+        vikingbot_result=_vikingbot_result("answer", total_time_sec=2, token_usage={
+            "prompt_tokens": 100, "completion_tokens": 20, "llm_total_tokens": 120,
+            "retrieval_embedding_tokens": 7, "total_tokens": 127,
+            "retrieval_embedding_usage_complete": True,
+        }),
+    )
+    assert result["token_usage"]["total_input_tokens"] == 107
+    assert result["token_usage"]["prompt_tokens"] == 100
+    assert result["token_usage"]["total_tokens"] == 127
+    with open(pipe.generated_file, "w") as f:
+        json.dump({"results": [result]}, f)
+    pipe._update_report({"Query Efficiency (Average Per Query)": {
+        "Average Retrieval Time (s)": 2,
+        **pipeline_mod.MetricsCalculator.average_qa_tokens([result]),
+    }})
+    monkeypatch.setattr(pipeline_mod, "llm_grader", lambda *args, **kwargs: {
+        "score": 4, "reasoning": "correct", "prompt_type": "judge",
+    })
+    pipe.run_evaluation()
+    with open(pipe.report_file) as f:
+        efficiency = json.load(f)["Query Efficiency (Average Per Query)"]
+    assert efficiency["Average Total Tokens"] == 127
+    assert efficiency["Average Embedding Tokens"] == 7
+    assert efficiency["Average LLM Tokens"] == 120
+    assert efficiency["Average Retrieval Time (s)"] == 2
+
+
+def test_eval_preserves_gen_metrics(tmp_path, monkeypatch):
+    pipe = _make_pipeline(tmp_path)
+    with open(pipe.generated_file, "w") as f:
+        json.dump({"results": [_generated_item(0, False)]}, f)
+    original = {"Average Total Tokens": 321, "Average Retrieval Time (s)": 7}
+    pipe._update_report({"Query Efficiency (Average Per Query)": original})
+    monkeypatch.setattr(pipeline_mod, "llm_grader", lambda *args, **kwargs: {
+        "score": 2, "reasoning": "incomplete", "prompt_type": "judge",
+    })
+    pipe.run_evaluation()
+    report = json.loads(Path(pipe.report_file).read_text())
+    assert report["Query Efficiency (Average Per Query)"] == original
+    assert report["Total Queries Evaluated"] == 1
+
+
+def test_generation_usage_gap_is_saved_logged_and_does_not_block_eval(tmp_path, monkeypatch, caplog):
+    qa = SimpleNamespace(question='q', gold_answers=['a'], category='cat', evidence=[])
+    adapter = SimpleNamespace(load_and_transform=lambda: [SimpleNamespace(sample_id='s', qa_pairs=[qa, qa])])
+    pipe = _make_pipeline(tmp_path, adapter=adapter)
+    issue = {'kind': 'llm', 'fields': ['completion_tokens'], 'iteration': 2, 'reason': 'missing_or_invalid'}
+    monkeypatch.setattr(pipeline_mod, 'run_vikingbot_query', lambda *args, **kwargs: _vikingbot_result(
+        'answer', total_time_sec=2,
+        token_usage={'prompt_tokens': 10, 'completion_tokens': 3, 'total_tokens': 13,
+                     'retrieval_embedding_tokens': 7, 'retrieval_embedding_usage_complete': False,
+                     'llm_usage_complete': False, 'usage_issues': [issue]},
+    ))
+    pipe.run_generation()
+    generated = json.loads(Path(pipe.generated_file).read_text())
+    assert generated['summary']['incomplete_usage_qa_ids'] == [0, 1]
+    assert all(not r['generation_failed'] for r in generated['results'])
+    assert generated['results'][0]['token_usage']['usage_issues'][0] == issue
+    report = json.loads(Path(pipe.report_file).read_text())
+    efficiency = report['Query Efficiency (Average Per Query)']
+    assert efficiency['Average Total Tokens'] == 20
+    assert efficiency['Queries Missing LLM Usage'] == 2
+    assert efficiency['Queries Missing Embedding Usage'] == 2
+    assert efficiency['Average Retrieval Time (s)'] == 2
+    assert [r['qa_id'] for r in report['Token Usage Issues']] == [0, 1]
+    monkeypatch.setattr(pipeline_mod, 'llm_grader', lambda *args, **kwargs: {
+        'score': 2, 'reasoning': 'incomplete answer', 'prompt_type': 'judge',
+    })
+    pipe.run_evaluation()
+    pipe.log_usage_issues()
+    assert 'QA IDs=[0, 1]' in caplog.text
+    assert 'Missing usage counted as 0' in caplog.text
+    updated = json.loads(Path(pipe.report_file).read_text())
+    assert updated['Total Queries Evaluated'] == 2
+    assert updated['Token Usage Issues'] == report['Token Usage Issues']
+    assert updated['Query Efficiency (Average Per Query)'] == efficiency

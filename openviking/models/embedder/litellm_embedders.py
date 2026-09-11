@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional
 import litellm
 
 from openviking.models.embedder.base import DenseEmbedderBase, EmbedResult
-from openviking.telemetry import get_current_telemetry
 from openviking_cli.utils import get_logger
 
 logger = get_logger(__name__)
@@ -138,33 +137,7 @@ class LiteLLMDenseEmbedder(DenseEmbedderBase):
 
     def _update_telemetry_token_usage(self, response) -> None:
         """Update telemetry and token usage from response."""
-        usage = getattr(response, "usage", None)
-        if not usage:
-            return
-
-        def _usage_value(key: str, default: int = 0) -> int:
-            if isinstance(usage, dict):
-                return int(usage.get(key, default) or default)
-            return int(getattr(usage, key, default) or default)
-
-        prompt_tokens = _usage_value("prompt_tokens", 0)
-        total_tokens = _usage_value("total_tokens", prompt_tokens)
-        output_tokens = max(total_tokens - prompt_tokens, 0)
-
-        # Update telemetry
-        get_current_telemetry().add_token_usage_by_source(
-            "embedding",
-            prompt_tokens,
-            output_tokens,
-        )
-
-        # Update token usage tracker
-        self.update_token_usage(
-            model_name=self.model_name,
-            provider="litellm",
-            prompt_tokens=prompt_tokens,
-            completion_tokens=output_tokens,
-        )
+        self._record_response_token_usage(getattr(response, "usage", None), "litellm")
 
     def embed(self, text: str, is_query: bool = False) -> EmbedResult:
         """Perform dense embedding on text via litellm.

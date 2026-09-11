@@ -14,6 +14,7 @@ from loguru import logger
 
 from vikingbot.agent.tools.base import Tool, ToolContext
 from vikingbot.openviking_mount.ov_server import VikingClient
+from vikingbot.utils.token_usage import record_embedding_usage, record_usage_issue
 
 if TYPE_CHECKING:
     from vikingbot.config.schema import Config
@@ -521,7 +522,18 @@ class VikingSearchTool(OVFileTool):
                 }
                 if search_user_id:
                     search_kwargs["user_id"] = search_user_id
-                results = await client.search(query, **search_kwargs)
+                usage = tool_context.token_usage
+                if usage is not None:
+                    search_kwargs["telemetry"] = True
+                try:
+                    results = await client.search(query, **search_kwargs)
+                except Exception:
+                    if usage is not None:
+                        record_usage_issue(usage, "embedding", ["summary.tokens.embedding.total"],
+                                           reason="search_request_failed")
+                    raise
+                if usage is not None:
+                    record_embedding_usage(usage, results.get("telemetry"))
                 filtered_items = self._filter_search_items(results, min_score=min_score)
                 for item_type, items in filtered_items.items():
                     grouped_items[item_type].extend(items)

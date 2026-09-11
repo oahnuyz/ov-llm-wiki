@@ -664,6 +664,7 @@ class VikingClient:
         limit: int = 10,
         user_id: Optional[str] = None,
         peer_id: Optional[str] = None,
+        telemetry: bool = False,
     ) -> Dict[str, Any]:
         client = self.client
         should_close = False
@@ -680,6 +681,7 @@ class VikingClient:
                 query,
                 target_uri=target_uri,
                 limit=limit,
+                **({"telemetry": True} if telemetry else {}),
             )
         finally:
             if should_close:
@@ -696,6 +698,7 @@ class VikingClient:
             "total": self._matched_context_total(result, memories, resources, skills),
             "query": query,
             "target_uri": target_uri,
+            **({"telemetry": result.get("telemetry")} if telemetry and isinstance(result, dict) else {}),
         }
 
     async def search_user_memory(self, query: str, user_id: str) -> list[Any]:

@@ -317,6 +317,8 @@ def main():
             pipeline.run_deletion()
 
         logger.info("Benchmark finished successfully.")
+        if args.step in ["all", "gen", "eval", "gen+eval"]:
+            pipeline.log_usage_issues()
 
     except KeyboardInterrupt:
         print("\n[Stop] Execution interrupted by user.")

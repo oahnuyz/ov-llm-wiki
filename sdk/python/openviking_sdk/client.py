@@ -1173,7 +1173,11 @@ class AsyncHTTPClient:
         }
         payload = self._compact_request_body(payload)
         response = await self._request("POST", "/api/v1/search/search", json=payload)
-        return self._handle_response_data(response).get("result", {})
+        data = self._handle_response_data(response)
+        result = data.get("result", {})
+        if telemetry is not False and data.get("telemetry") is not None:
+            result["telemetry"] = data["telemetry"]
+        return result
 
     async def grep(
         self,

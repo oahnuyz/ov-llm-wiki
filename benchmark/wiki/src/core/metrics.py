@@ -7,31 +7,85 @@ from typing import List
 class MetricsCalculator:
     @staticmethod
     def qa_token_usage(usage: dict) -> tuple[int, int, int]:
-        """Read cumulative QA-agent usage, including legacy zero-filled aliases.
+        """Read cumulative generation usage, including query embedding tokens.
 
-        These are generation LLM tokens across all iterations, excluding Judge,
-        ingestion, Wiki construction, and retrieval embedding usage.
+        New records distinguish llm_total_tokens from the combined total_tokens.
+        Legacy records used total_tokens for LLM usage alone. Judge, ingestion
+        and Wiki construction are excluded.
         """
         def first_value(*keys):
             return next((int(usage[key]) for key in keys if usage.get(key) is not None), 0)
 
         input_tokens = first_value("prompt_tokens", "input_tokens", "total_input_tokens")
         output_tokens = first_value("completion_tokens", "output_tokens", "llm_output_tokens")
-        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        embedding_tokens = int(usage.get("retrieval_embedding_tokens") or 0)
+        llm_total = usage.get("llm_total_tokens")
+        if llm_total is None:
+            llm_total = usage.get("total_tokens")
+            if llm_total is None:
+                llm_total = input_tokens + output_tokens
+        # The legacy input alias can already include embedding in normalized records.
+        if any(usage.get(key) is not None for key in ("prompt_tokens", "input_tokens")):
+            input_tokens += embedding_tokens
+        total_tokens = int(llm_total) + embedding_tokens
         return input_tokens, output_tokens, total_tokens
+
+    @staticmethod
+    def embedding_usage_complete(result: dict) -> bool:
+        usage = result.get("token_usage") or {}
+        if "retrieval_embedding_usage_complete" in usage:
+            return usage["retrieval_embedding_usage_complete"] is True
+        # Old VikingBot records hard-coded embedding=0 even when search was used.
+        return "openviking_search" not in ((result.get("vikingbot") or {}).get("tools_used_names") or [])
+
+    @staticmethod
+    def llm_usage_complete(result: dict) -> bool:
+        usage = result.get("token_usage") or {}
+        if "llm_usage_complete" in usage:
+            return usage["llm_usage_complete"] is True
+        return all(usage.get(key) is not None for key in
+                   ("prompt_tokens", "completion_tokens", "total_tokens"))
+
+    @staticmethod
+    def usage_issues(result: dict) -> list[dict]:
+        """Preserve request-level issues; identify missing metadata in older results."""
+        issues = list((result.get("token_usage") or {}).get("usage_issues") or [])
+        for kind, complete in (
+            ("llm", MetricsCalculator.llm_usage_complete(result)),
+            ("embedding", MetricsCalculator.embedding_usage_complete(result)),
+        ):
+            if not complete and not any(issue.get("kind") == kind for issue in issues):
+                issues.append({"kind": kind, "reason": "usage_missing_or_incomplete"})
+        return issues
 
     @staticmethod
     def average_qa_tokens(results: list[dict]) -> dict:
         """Match the efficiency report's successful-query denominator."""
+        results = [r for r in results if r.get("generation_failed") is not True]
         usages = [
             MetricsCalculator.qa_token_usage(result.get("token_usage") or {})
-            for result in results if result.get("generation_failed") is not True
+            for result in results
         ]
-        keys = ("Average Input Tokens", "Average Output Tokens", "Average Total Tokens")
-        return {
-            key: sum(usage[index] for usage in usages) / len(usages) if usages else 0
-            for index, key in enumerate(keys)
+        embedding = [int((r.get("token_usage") or {}).get("retrieval_embedding_tokens") or 0) for r in results]
+        embedding_total = sum(embedding)
+        missing = sum(not MetricsCalculator.embedding_usage_complete(r) for r in results)
+        count = len(results)
+        llm_input = sum(u[0] for u in usages) - embedding_total
+        llm_output = sum(u[1] for u in usages)
+        llm_total = sum(u[2] for u in usages) - embedding_total
+        totals = {
+            "Average Input Tokens": llm_input + embedding_total,
+            "Average Output Tokens": llm_output,
+            "Average LLM Tokens": llm_total,
+            "Average Embedding Tokens": embedding_total,
+            "Average Total Tokens": llm_total + embedding_total,
         }
+        averages = {key: value / count if count else 0 for key, value in totals.items()}
+        averages["Queries Missing Embedding Usage"] = missing
+        averages["Queries Missing LLM Usage"] = sum(
+            not MetricsCalculator.llm_usage_complete(r) for r in results
+        )
+        return averages
 
     @staticmethod
     def normalize_answer(s):
@@ -54,11 +108,6 @@ class MetricsCalculator:
         precision = 1.0 * num_same / len(pred_tokens)
         recall = 1.0 * num_same / len(truth_tokens)
         return (2 * precision * recall) / (precision + recall)
-
-    @staticmethod
-    def check_refusal(text: str) -> bool:
-        refusals = ["not mentioned", "no information", "cannot be answered", "unknown", "don't know"]
-        return any(r in text.lower() for r in refusals)
 
     @staticmethod
     def check_recall(retrieved_texts: List[str], evidence_list: List[str], soft_threshold: float = 0.8, min_soft_match_tokens: int = 4) -> float:
