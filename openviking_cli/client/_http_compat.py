@@ -240,12 +240,19 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
         telemetry: Any = False,
+        *,
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
+        build_stage: str = "all",
     ) -> Dict[str, Any]:
         payload = {
             "resource_uris": resource_uris,
             "wiki_root_uri": wiki_root_uri,
             "card_input_mode": card_input_mode,
             "max_card_input_chars": max_card_input_chars,
+            "max_source_input_chars": max_source_input_chars,
+            "full_document_texts": full_document_texts,
+            "build_stage": build_stage,
             "telemetry": telemetry,
         }
         response = await self._request("POST", "/api/v1/wiki/build", json=payload)
@@ -304,6 +311,10 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
         telemetry: Any = False,
+        *,
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
+        build_stage: str = "all",
     ) -> Dict[str, Any]:
         return run_async(
             self._async_client.build_wiki(
@@ -311,6 +322,9 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
                 wiki_root_uri=wiki_root_uri,
                 card_input_mode=card_input_mode,
                 max_card_input_chars=max_card_input_chars,
+                max_source_input_chars=max_source_input_chars,
+                full_document_texts=full_document_texts,
+                build_stage=build_stage,
                 telemetry=telemetry,
             )
         )

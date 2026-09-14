@@ -20,6 +20,7 @@ RAW_TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 class WikiCardInputMode(str, Enum):
     SUMMARY = "summary"
     RAW_CHUNK = "raw_chunk"
+    FULL_DOCUMENT = "full_document"
 
 
 class WikiContentLoader:
@@ -41,8 +42,20 @@ class WikiContentLoader:
         *,
         mode: WikiCardInputMode | str,
         max_card_input_chars: int,
+        max_source_input_chars: int | None = None,
+        full_document_text: str | None = None,
     ) -> ResourceDocument:
         input_mode = WikiCardInputMode(mode)
+        if input_mode == WikiCardInputMode.FULL_DOCUMENT:
+            if not full_document_text or not full_document_text.strip():
+                raise ValueError(f"Full document text is missing or empty: {doc.doc_id} ({doc.resource_uri})")
+            return ResourceDocument(
+                doc_id=doc.doc_id,
+                resource_uri=doc.resource_uri,
+                title=doc.title,
+                content_or_structure=full_document_text,
+                metadata={**doc.metadata, "card_input_mode": input_mode.value},
+            )
         root_uri = doc.document_dir_uri or doc.resource_uri
         entries = await self._collect_entries(root_uri, mode=input_mode)
         missing = [entry["uri"] for entry in entries if entry.get("missing_summary")]
@@ -54,7 +67,10 @@ class WikiContentLoader:
                     "rerun after semantic generation succeeds or use raw_chunk mode"
                 )
         content = self._render_entries(entries, max_chars=max_card_input_chars)
-        source_sections = self._source_sections_from_entries(entries, max_chars=max_card_input_chars)
+        source_sections = self._source_sections_from_entries(
+            entries,
+            max_chars=max_card_input_chars if max_source_input_chars is None else max_source_input_chars,
+        )
         return ResourceDocument(
             doc_id=doc.doc_id,
             resource_uri=doc.resource_uri,

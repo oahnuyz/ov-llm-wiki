@@ -269,6 +269,37 @@ class TestExtractBookmarks:
 class TestConvertLocalBookmarks:
     """Test bookmark injection behavior in local PDF conversion."""
 
+    def test_extract_full_text_keeps_page_order_and_tables_without_exporting_images(self):
+        parser = PDFParser()
+        pages = [_FakePage("First page"), _FakePage("Last page")]
+        pages[0].images = [{"image": "must not be exported"}]
+        pages[0].extract_tables = lambda: [[['Method', 'Score'], ['FullDoc', '42']]]
+        fake_pdf = SimpleNamespace(pages=pages)
+        fake_pdfplumber = SimpleNamespace(open=lambda _path: nullcontext(fake_pdf))
+        with (
+            patch("openviking.parse.parsers.pdf.lazy_import", return_value=fake_pdfplumber),
+            patch.object(parser, "_extract_bookmarks", return_value=[{"level": 1, "title": "Title", "page_num": 1}]),
+            patch("openviking_cli.utils.storage.get_storage", side_effect=AssertionError("storage must not be initialized")),
+            patch.object(parser, "_get_markdown_parser", side_effect=AssertionError("must not split")),
+            patch.object(parser, "_extract_image_from_page", side_effect=AssertionError("must not export images")),
+        ):
+            text = parser.extract_text("dummy.pdf")
+        assert text.index("# Title") < text.index("First page") < text.index("Last page")
+        assert "| FullDoc | 42 |" in text
+        assert "![" not in text
+        assert [page.close_count for page in pages] == [1, 1]
+
+    def test_extract_full_text_rejects_image_only_pdf(self):
+        parser = PDFParser()
+        fake_pdfplumber = SimpleNamespace(open=lambda _path: nullcontext(SimpleNamespace(pages=[_FakePage("")])))
+        with (
+            patch("openviking.parse.parsers.pdf.lazy_import", return_value=fake_pdfplumber),
+            patch.object(parser, "_extract_bookmarks", return_value=[]),
+            patch.object(parser, "_detect_headings_by_font", return_value=[]),
+            pytest.raises(ValueError, match="no extractable text"),
+        ):
+            parser.extract_text("scanned.pdf")
+
     @pytest.mark.asyncio
     async def test_convert_local_skips_unresolved_bookmarks(self):
         parser = PDFParser()

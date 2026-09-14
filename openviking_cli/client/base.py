@@ -57,6 +57,10 @@ class BaseClient(ABC):
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
         telemetry: TelemetryRequest = False,
+        *,
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
+        build_stage: str = "all",
     ) -> Dict[str, Any]:
         """Build Wiki from existing resources."""
         ...

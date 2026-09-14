@@ -22,6 +22,8 @@ async def test_service_wiki_build_uses_stable_wiki_root(monkeypatch):
             content_loader,
             card_input_mode,
             max_card_input_chars,
+            max_source_input_chars,
+            full_document_texts,
             build_stage,
         ):
             captured["build_stage"] = build_stage
@@ -74,6 +76,8 @@ async def test_service_wiki_build_expands_document_manifest(monkeypatch):
             content_loader,
             card_input_mode,
             max_card_input_chars,
+            max_source_input_chars,
+            full_document_texts,
             build_stage,
         ):
             captured["wiki_inputs"] = wiki_inputs
@@ -141,6 +145,8 @@ async def test_service_wiki_build_allows_missing_vlm_config(monkeypatch):
             content_loader,
             card_input_mode,
             max_card_input_chars,
+            max_source_input_chars,
+            full_document_texts,
             build_stage,
         ):
             return SimpleNamespace(cards=[], nodes=[], node_contexts=[])

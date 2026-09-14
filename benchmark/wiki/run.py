@@ -181,7 +181,7 @@ def main():
         'retrieval_topk': retrieval_topk
     }
 
-    path_keys = ['dataset_path', 'output_dir', 'vector_store', 'log_file', 'doc_output_dir']
+    path_keys = ['dataset_path', 'output_dir', 'vector_store', 'log_file', 'doc_output_dir', 'resource_manifest']
     for key in path_keys:
         if key in config.get('paths', {}):
             original = config['paths'][key]

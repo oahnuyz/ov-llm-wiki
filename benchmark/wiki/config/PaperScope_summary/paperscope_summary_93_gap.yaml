@@ -18,11 +18,13 @@ execution:
   build_wiki: true
   wiki_card_input_mode: "summary"
   wiki_max_card_input_chars: 20000
+  wiki_max_source_input_chars: 20000
   retrieval_instruction: ""
 
 paths:
   dataset_path: "datasets/PaperScopeSummary93/summary_gap.jsonl"
   doc_output_dir: "wiki_storage/paperscope_summary_93/paperscope_summary_93_processed_docs"
+  resource_manifest: "wiki_storage/paperscope_summary_93/imported_resources.json"
   vector_store: "wiki_storage/paperscope_summary_93/paperscope_summary_93_viking_store_index"
   output_dir: "Output/{dataset_name}/wiki"
   log_file: "Output/{dataset_name}/wiki/benchmark.log"

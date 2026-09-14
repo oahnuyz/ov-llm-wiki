@@ -281,6 +281,9 @@ class SyncOpenViking:
         max_card_input_chars: int = 20000,
         build_stage: str = "all",
         telemetry: TelemetryRequest = False,
+        *,
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
     ) -> Dict[str, Any]:
         """Build Wiki from existing resources."""
         return run_async(
@@ -289,6 +292,8 @@ class SyncOpenViking:
                 wiki_root_uri=wiki_root_uri,
                 card_input_mode=card_input_mode,
                 max_card_input_chars=max_card_input_chars,
+                max_source_input_chars=max_source_input_chars,
+                full_document_texts=full_document_texts,
                 build_stage=build_stage,
                 telemetry=telemetry,
             )

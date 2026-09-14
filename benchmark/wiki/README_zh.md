@@ -351,7 +351,32 @@ import -> 可选 build_wiki -> gen -> eval
 
 - 读取 `import` 阶段写入的 `imported_resources.json`。
 - 调用 OpenViking 的独立 Wiki 生成接口。
-- 使用 YAML 中的 `wiki_card_input_mode` 和 `wiki_max_card_input_chars`。
+- 使用 YAML 中的 `wiki_card_input_mode`、`wiki_max_card_input_chars` 和 `wiki_max_source_input_chars`。
+
+初始 card 支持 `summary`（入库叶子摘要）、`raw_chunk`（入库文本片段）和
+`full_document`（未切片的原始文档全文）。PaperScope 93 篇与 ScholarQA-Multi 当前使用
+`summary`，card 输入预算为 20,000 字符。需要全文输入时可切换为：
+
+```yaml
+wiki_card_input_mode: "full_document"
+wiki_max_source_input_chars: 20000
+```
+
+全文模式通过 adapter 准备的原始文件和资源侧 `.wiki_documents.json`，按 document ID
+建立全文到资源 URI 的对应关系。TXT/Markdown 直接完整读取；PDF 使用本地 pdfplumber
+提取完整标题、正文和表格，不切片、不导出 PNG、不生成图片摘要，也不重新入库或向量化。
+PDF 文本缓存在 `vector_store` 的同级 `full_document_texts/` 中；原文件内容变化后重新解析。
+保留来源文件和已有 `imported_resources.json` 即可单独运行 `--step build_wiki_cards`。
+可通过 `paths.resource_manifest` 指定已保留的入库清单；PaperScope 93 篇配置指向
+`wiki_storage/paperscope_summary_93/imported_resources.json`，不依赖已清理的 Output 目录。
+只执行 `build_wiki_nodes` 时不读取原文件，继续复用已有 card。
+
+`wiki_max_card_input_chars` 仅作用于 `summary` / `raw_chunk`，不裁剪全文模式的输入。
+`wiki_max_source_input_chars` 单独控制节点正文的来源片段预算，默认 20,000 字符；
+此前用 card 参数调整正文预算的配置，需要把该值移到此新参数。
+全文缺失或空白会报错；超出模型上下文时保留请求错误和文档标识，不会自动截断、
+摘要或分批。当前没有模型 tokenizer 预检查，运行前需确认模型能容纳单篇全文及输出。
+ScholarQA-Multi 的原始 TXT 是官方引用片段合并文档，完整读取不等于获取了论文全文。
 
 `gen`：
 

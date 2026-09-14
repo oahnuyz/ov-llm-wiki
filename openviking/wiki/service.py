@@ -42,16 +42,20 @@ class WikiService:
         resource_uris: list[str],
         ctx: RequestContext,
         wiki_root_uri: str = "viking://wiki/",
-        card_input_mode: Literal["summary", "raw_chunk"] = "summary",
+        card_input_mode: Literal["summary", "raw_chunk", "full_document"] = "summary",
         max_card_input_chars: int = 20000,
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
         build_stage: Literal["all", "cards", "nodes"] = "all",
     ) -> dict[str, Any]:
         self._ensure_initialized()
         self._validate_wiki_root_uri(wiki_root_uri)
-        if card_input_mode not in {"summary", "raw_chunk"}:
-            raise InvalidArgumentError("card_input_mode must be either 'summary' or 'raw_chunk'")
-        if int(max_card_input_chars or 0) <= 0:
+        if card_input_mode not in {"summary", "raw_chunk", "full_document"}:
+            raise InvalidArgumentError("card_input_mode must be one of: summary, raw_chunk, full_document")
+        if card_input_mode != "full_document" and int(max_card_input_chars or 0) <= 0:
             raise InvalidArgumentError("max_card_input_chars must be positive")
+        if max_source_input_chars <= 0:
+            raise InvalidArgumentError("max_source_input_chars must be positive")
         if build_stage not in {"all", "cards", "nodes"}:
             raise InvalidArgumentError("build_stage must be one of: all, cards, nodes")
 
@@ -80,6 +84,8 @@ class WikiService:
             content_loader=loader,
             card_input_mode=card_input_mode,
             max_card_input_chars=max_card_input_chars,
+            max_source_input_chars=max_source_input_chars,
+            full_document_texts=full_document_texts,
             build_stage=build_stage,
         )
         return {

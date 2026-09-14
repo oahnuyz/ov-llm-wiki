@@ -220,8 +220,16 @@ class PDFParser(BaseParser):
         # 放到线程池中执行，避免阻塞事件循环。
         return await asyncio.to_thread(self._convert_local_sync, pdf_path, storage, resource_name)
 
+    def extract_text(self, source: Union[str, Path]) -> str:
+        """Extract the complete local Markdown text without splitting or exporting images."""
+        text, meta = self._convert_local_sync(Path(source), extract_images=False)
+        if meta["pages_processed"] == 0:
+            raise ValueError(f"PDF has no extractable text: {source}")
+        return text
+
     def _convert_local_sync(
-        self, pdf_path: Path, storage=None, resource_name: Optional[str] = None
+        self, pdf_path: Path, storage=None, resource_name: Optional[str] = None,
+        *, extract_images: bool = True,
     ) -> tuple[str, Dict[str, Any]]:
         """同步版：用 pdfplumber 将 PDF 转 Markdown。
 
@@ -230,7 +238,7 @@ class PDFParser(BaseParser):
         pdfplumber = lazy_import("pdfplumber")
 
         # Import storage utilities
-        if storage is None:
+        if extract_images and storage is None:
             from openviking_cli.utils.storage import get_storage
 
             storage = get_storage()
@@ -330,7 +338,7 @@ class PDFParser(BaseParser):
                                     meta["tables_extracted"] += 1
 
                         # Extract images
-                        images = page.images
+                        images = page.images if extract_images else []
                         for img_idx, img in enumerate(images or []):
                             try:
                                 # Extract image using underlying PDF object

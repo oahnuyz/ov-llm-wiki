@@ -338,14 +338,37 @@ add_resource -> build_wiki -> clear_wiki
 
 `ResourceService.add_resource(...)` 不再接受 `build_wiki`、`wiki_card_input_mode` 或 `wiki_max_card_input_chars`。调用方必须先完成资源入库，再显式调用 Wiki 构建。
 
-`WikiContentLoader` 支持两种 card 输入模式：
+`WikiContentLoader` 支持三种 card 输入模式：
 
 | 模式 | 行为 | 适用场景 |
 | --- | --- | --- |
-| `summary` | 读取语义摘要、overview 和 chunk abstract | 语义生成已完成且质量可用 |
+| `summary` | 读取文档各叶子文件的 L2 abstract，包括图片摘要 | 语义生成已完成且质量可用 |
 | `raw_chunk` | 直接读取原始 chunk 内容 | 没有摘要，或需要绕过摘要质量问题 |
+| `full_document` | 使用调用方提供的切片前全文，不做字符裁剪 | 保留原文顺序，绕过片段摘要和 card 输入截断 |
 
 如果 `summary` 模式读不到可用摘要，构建会提前失败。此时要么先完成语义生成，要么切到 `raw_chunk`。
+
+`full_document` 通过 `build_wiki(full_document_texts={文档资源URI: 全文})` 接收文本，
+URI 对应 `.wiki_documents.json` 展开的每篇文档，而非多篇文档的资源根。
+调用方负责读取原始 TXT/Markdown，或先用 `PDFParser.extract_text(path)` 提取 PDF 的全文。
+PDF 提取保留页顺序、标题、正文和 Markdown 表格，不切片、不导出图片、不调用视觉模型。
+服务端不接受本机文件路径，也不会在全文缺失时回退到 chunk 或摘要。
+
+`max_card_input_chars` 只裁剪 `summary` / `raw_chunk` 的 card 输入，在全文模式下不生效。
+`max_source_input_chars` 独立控制每篇来源文档供节点正文生成使用的片段预算，默认仍为 20,000 字符。
+`build_stage="nodes"` 直接复用已存 card，不需要提供全文。
+全文模式仍受模型上下文限制；当前不进行 tokenizer 估算或自动分批。
+模型请求失败时错误包含文档 ID、资源 URI 和输入字符数，不会静默截断后重试。
+
+```python
+client.build_wiki(
+    resource_uris=["viking://resources/papers"],
+    card_input_mode="full_document",
+    full_document_texts={"viking://resources/papers/paper_a": full_text},
+    max_source_input_chars=20000,
+    build_stage="cards",
+)
+```
 
 ## 常用配置
 

@@ -88,11 +88,22 @@ class WikiPipeline:
         card_input_mode: WikiCardInputMode | str = WikiCardInputMode.SUMMARY,
         max_card_input_chars: int = 20000,
         build_stage: Literal["all", "cards", "nodes"] = "all",
+        max_source_input_chars: int = 20000,
+        full_document_texts: dict[str, str] | None = None,
     ) -> PipelineArtifacts:
         if not docs:
             raise ValueError("Wiki pipeline requires at least one resource document")
         if build_stage not in {"all", "cards", "nodes"}:
             raise ValueError("build_stage must be one of: all, cards, nodes")
+        input_mode = WikiCardInputMode(card_input_mode)
+        if input_mode == WikiCardInputMode.FULL_DOCUMENT and build_stage != "nodes":
+            expected = {doc.resource_uri for doc in docs}
+            provided = set(full_document_texts or {})
+            if expected != provided:
+                raise ValueError(
+                    "full_document_texts must map each document resource URI to its complete text; "
+                    f"missing={sorted(expected - provided)}, unexpected={sorted(provided - expected)}"
+                )
 
         artifacts = PipelineArtifacts()
         await self.writer.ensure_dirs()
@@ -104,7 +115,7 @@ class WikiPipeline:
                 docs,
                 content_loader=content_loader,
                 mode=WikiCardInputMode.RAW_CHUNK,
-                max_card_input_chars=max_card_input_chars,
+                max_card_input_chars=max_source_input_chars,
             )
             await self.writer.reset_node_outputs()
             return await self._run_from_cards(
@@ -121,12 +132,13 @@ class WikiPipeline:
             card_input_mode,
         )
 
-        input_mode = WikiCardInputMode(card_input_mode)
         resource_docs = await self._load_documents(
             docs,
             content_loader=content_loader,
             mode=input_mode,
             max_card_input_chars=max_card_input_chars,
+            max_source_input_chars=max_source_input_chars,
+            full_document_texts=full_document_texts,
         )
         source_docs_task = (
             None
@@ -136,7 +148,7 @@ class WikiPipeline:
                     docs,
                     content_loader=content_loader,
                     mode=WikiCardInputMode.RAW_CHUNK,
-                    max_card_input_chars=max_card_input_chars,
+                    max_card_input_chars=max_source_input_chars,
                 )
             )
         )
@@ -171,6 +183,8 @@ class WikiPipeline:
         content_loader: WikiContentLoader,
         mode: WikiCardInputMode,
         max_card_input_chars: int,
+        max_source_input_chars: int | None = None,
+        full_document_texts: dict[str, str] | None = None,
     ) -> list[ResourceDocument]:
         max_concurrent = max(1, self.config.limits.max_concurrent_cards)
         sem = asyncio.Semaphore(max_concurrent)
@@ -182,6 +196,8 @@ class WikiPipeline:
                     doc,
                     mode=mode,
                     max_card_input_chars=max_card_input_chars,
+                    max_source_input_chars=max_source_input_chars,
+                    full_document_text=(full_document_texts or {}).get(doc.resource_uri),
                 )
 
         await asyncio.gather(*[_load_one(index, doc) for index, doc in enumerate(docs)])

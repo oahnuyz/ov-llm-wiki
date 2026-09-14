@@ -125,6 +125,8 @@ class VikingStoreWrapper:
         card_input_mode: str = "summary",
         max_card_input_chars: int = 20000,
         build_stage: str = "all",
+        max_source_input_chars: int = 20000,
+        source_documents: List[StandardDoc] | None = None,
     ) -> dict:
         start_time = time.time()
         if not resource_uris:
@@ -133,10 +135,20 @@ class VikingStoreWrapper:
                 "status": "skipped",
                 "resource_uris": [],
             }
+        full_document_texts = None
+        if card_input_mode == "full_document" and build_stage != "nodes":
+            from .full_document_inputs import prepare_full_document_texts
+
+            full_document_texts = prepare_full_document_texts(
+                self.client, resource_uris, source_documents or [],
+                Path(self.store_path).parent / "full_document_texts",
+            )
         result = self.client.build_wiki(
             resource_uris=resource_uris,
             card_input_mode=card_input_mode,
             max_card_input_chars=max_card_input_chars,
+            max_source_input_chars=max_source_input_chars,
+            full_document_texts=full_document_texts,
             build_stage=build_stage,
         )
         result["time"] = time.time() - start_time

@@ -33,7 +33,13 @@ class DocumentCardGenerator:
 
         async def _generate_card_at_index(index: int, doc: ResourceDocument) -> None:
             async with sem:
-                cards[index] = await self._generate_card(doc)
+                try:
+                    cards[index] = await self._generate_card(doc)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Document card failed: {doc.doc_id} ({doc.resource_uri}), "
+                        f"input_chars={len(doc.content_or_structure)}: {exc}"
+                    ) from exc
 
         await asyncio.gather(
             *[_generate_card_at_index(index, doc) for index, doc in enumerate(docs)]

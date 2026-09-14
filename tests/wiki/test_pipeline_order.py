@@ -3,6 +3,7 @@ import json
 import pytest
 
 from openviking.wiki.config import WikiConfig
+from openviking.wiki.content_loader import WikiContentLoader
 from openviking.wiki.llm import WikiLLMRunner
 from openviking.wiki.pipeline import WikiPipeline
 from openviking.wiki.schemas import ResourceDocument, SourceSection, WikiResourceInput
@@ -135,3 +136,72 @@ async def test_pipeline_nodes_stage_reuses_persisted_cards():
     assert all(f"viking://wiki/cards/doc_{index}.card.json" in client.writes for index in range(1, 4))
     assert ("viking://wiki/nodes/", True) in client.removed
     assert '"build_stage": "nodes"' in client.writes["viking://wiki/run/config.json"]
+
+
+@pytest.mark.asyncio
+async def test_full_document_cards_keep_entire_original_without_reading_chunks():
+    uri = "viking://resources/paper"
+    full_text = "# Original title\n" + "Evidence.\n" * 4000 + "FINAL_RESULT_42"
+    fake_vlm = FakeVLM([_card_content(1)])
+    client, config = FakeClient(), WikiConfig()
+    artifacts = await WikiPipeline(
+        writer=_writer(client, config), config=config, llm=WikiLLMRunner(fake_vlm)
+    ).run_from_inputs(
+        [WikiResourceInput(doc_id="paper", resource_uri=uri, title="Paper")],
+        content_loader=WikiContentLoader(object(), object(), object()),
+        card_input_mode="full_document", full_document_texts={uri: full_text},
+        max_card_input_chars=1000, build_stage="cards",
+    )
+    assert len(artifacts.cards) == 1
+    assert json.dumps(full_text) in fake_vlm.calls[0]
+    assert "...(truncated)" not in fake_vlm.calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("texts", [None, {"viking://resources/wrong": "text"}, {"viking://resources/paper": " "}])
+async def test_full_document_missing_source_fails_before_model_call(texts):
+    fake_vlm = FakeVLM([])
+    client, config = FakeClient(), WikiConfig()
+    with pytest.raises(ValueError, match="full_document_texts|missing or empty"):
+        await WikiPipeline(
+            writer=_writer(client, config), config=config, llm=WikiLLMRunner(fake_vlm)
+        ).run_from_inputs(
+            [WikiResourceInput(doc_id="paper", resource_uri="viking://resources/paper", title="Paper")],
+            content_loader=WikiContentLoader(object(), object(), object()),
+            card_input_mode="full_document", full_document_texts=texts, build_stage="cards",
+        )
+    assert fake_vlm.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["summary", "raw_chunk", "full_document"])
+async def test_pipeline_keeps_node_source_budget_independent_of_card_budget(mode, monkeypatch):
+    from .test_content_loader import FakeVikingFS
+
+    class SourceFS(FakeVikingFS):
+        async def read_file(self, uri, **kwargs):
+            return "source evidence " * 300
+
+    class SummaryDB:
+        async def get_context_by_uri(self, **kwargs):
+            return [{"abstract": "summary " * 600}]
+
+    doc = _wiki_input(_doc(1))
+    captured = {}
+    client, config = FakeClient(), WikiConfig()
+    pipeline = WikiPipeline(
+        writer=_writer(client, config), config=config, llm=WikiLLMRunner(FakeVLM([_card_content(1)]))
+    )
+
+    async def capture_sources(cards, artifacts, source_docs, **kwargs):
+        captured.update(source_docs)
+        return artifacts
+
+    monkeypatch.setattr(pipeline, "_run_from_cards", capture_sources)
+    await pipeline.run_from_inputs(
+        [doc], content_loader=WikiContentLoader(SourceFS(), SummaryDB(), object()),
+        card_input_mode=mode, max_card_input_chars=1000, max_source_input_chars=12000,
+        full_document_texts={doc.resource_uri: "Original uncut text"} if mode == "full_document" else None,
+    )
+    assert len(captured[doc.doc_id].source_sections) == 2
+    assert all(s.content == ("source evidence " * 300).strip() for s in captured[doc.doc_id].source_sections)

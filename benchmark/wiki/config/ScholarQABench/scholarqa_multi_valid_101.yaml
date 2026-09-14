@@ -18,6 +18,7 @@ execution:
   build_wiki: true
   wiki_card_input_mode: "summary"
   wiki_max_card_input_chars: 20000
+  wiki_max_source_input_chars: 20000
   retrieval_instruction: ""
 
 paths:

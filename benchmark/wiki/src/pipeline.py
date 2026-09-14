@@ -36,7 +36,9 @@ class BenchmarkPipeline:
         self.generated_file = os.path.join(self.output_dir, "generated_answers.json")
         self.eval_file = os.path.join(self.output_dir, "qa_eval_detailed_results.json")
         self.report_file = os.path.join(self.output_dir, "benchmark_metrics_report.json")
-        self.resource_manifest_file = os.path.join(self.output_dir, "imported_resources.json")
+        self.resource_manifest_file = self.config['paths'].get(
+            'resource_manifest', os.path.join(self.output_dir, "imported_resources.json")
+        )
         
         self.metrics_summary = {
             "insertion": {"time": 0, "input_tokens": 0, "output_tokens": 0, "embedding_tokens": 0},
@@ -96,11 +98,19 @@ class BenchmarkPipeline:
         wiki_max_card_input_chars = int(
             self.config['execution'].get('wiki_max_card_input_chars', 20000)
         )
+        wiki_max_source_input_chars = int(
+            self.config['execution'].get('wiki_max_source_input_chars', 20000)
+        )
+        source_documents = None
+        if wiki_card_input_mode == 'full_document' and build_stage != 'nodes':
+            source_documents = self.adapter.data_prepare(self.config['paths']['doc_output_dir'])
         self.logger.info(f"Building Wiki for {len(resource_uris)} resource roots")
         wiki_stats = self.db.build_wiki(
             resource_uris=resource_uris,
             card_input_mode=wiki_card_input_mode,
             max_card_input_chars=wiki_max_card_input_chars,
+            max_source_input_chars=wiki_max_source_input_chars,
+            source_documents=source_documents,
             build_stage=build_stage,
         )
         self.logger.info(f"Wiki build finished. Time: {wiki_stats['time']:.2f}s")
