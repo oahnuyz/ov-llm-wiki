@@ -8,8 +8,10 @@ from typing import Any
 
 @dataclass
 class WikiGenerationLimits:
-    # 每层 tool-calling 聚合 agent 的最大决策轮数。
-    aggregation_agent_max_turns: int = 50
+    # 每批加入的新 card 数量；此前未分配的 card 额外结转。
+    aggregation_batch_size: int = 25
+    # 每批最大决策轮数；达到上限后保留状态并结束本批。
+    aggregation_agent_max_turns: int = 40
     # 仅用于节点聚合 agent 每轮工具调用的最大输出 token 数。
     aggregation_agent_max_tokens: int = 12288
     # 层结束后按滑动窗口切分目录节点时的最大子 card 数量。

@@ -99,6 +99,7 @@ class ResourceDocument(StrictModel):
 
 class DocumentCardContent(StrictModel):
     """LLM 为单篇文档提炼的语义卡片内容，不包含系统已知的文档标识字段。"""
+    title: NonEmptyStr
     summary: NonEmptyStr
     candidate_topics: NonEmptyStrList
 
@@ -107,7 +108,6 @@ class DocumentCard(DocumentCardContent):
     """原始来源文档的结构化卡片。"""
     doc_id: NonEmptyStr
     resource_uri: ResourceUri
-    title: NonEmptyStr
     markdown: str = ""
 
 
@@ -125,21 +125,25 @@ class NodeCard(NodeCardContent):
     markdown: str = ""
 
 
-class AggregationCardView(StrictModel):
-    """聚合 agent 使用的 card 语义视图。"""
+class AggregationMemberView(StrictModel):
+    """已分配成员的简略视图，不含 summary。"""
     card_id: NonEmptyStr
     title: NonEmptyStr
-    summary: NonEmptyStr
     candidate_topics: NonEmptyStrList | None = None
     scope: NonEmptyStr | None = None
 
 
+class AggregationCardView(AggregationMemberView):
+    """待分配 card 的完整语义视图。"""
+    summary: NonEmptyStr
+
+
 class AggregationNodeView(StrictModel):
-    """聚合 agent 当前可编辑的目录节点及其完整成员 card。"""
+    """聚合 agent 当前可编辑的目录节点及其简略成员 card。"""
     node_id: NodeId
     title: NonEmptyStr
     scope: NonEmptyStr
-    cards: list[AggregationCardView] = Field(min_length=2)
+    cards: list[AggregationMemberView] = Field(min_length=2)
 
 
 class CreateNodeToolArgs(StrictModel):
@@ -186,7 +190,11 @@ class UpdateNodeScopeToolArgs(StrictModel):
     scope: NonEmptyStr
 
 
-class FinishLayerToolArgs(StrictModel):
+class ReadSummaryToolArgs(StrictModel):
+    card_ids: NonEmptyStrList
+
+
+class FinishToolArgs(StrictModel):
     pass
 
 

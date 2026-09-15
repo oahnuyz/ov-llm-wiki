@@ -2,7 +2,7 @@ metadata:
   id: "wiki.document_card"
   name: "Wiki Document Card"
   description: "Generate one Wiki Document Card from a resource document"
-  version: "1.3.0"
+  version: "1.5.0"
   language: "en"
   category: "wiki"
 
@@ -13,12 +13,12 @@ variables:
     required: true
 
 template: |
-  Generate one Wiki Document Card for the given resource document.
+  Generate a document card for grouping related research and preserving evidence for later synthesis.
+  Ground the card in content_or_structure; metadata describes the input context.
 
-  The input contains content_or_structure and metadata. Use only those fields.
-  The card will be used to group related research and preserve evidence for later synthesis.
-  Return only summary and candidate_topics.
-  Do not return doc_id, resource_uri, title, markdown, node fields, or source assignment fields.
+  Title requirements:
+  - Use a reliable original title from the content; otherwise write a concise, specific descriptive title.
+    Do not invent an official publication title or use garbled text, filenames, IDs, or paths.
 
   Summary requirements:
   - State the research question or problem, then preserve supported evidence as compact evidence units:
@@ -42,7 +42,7 @@ template: |
   Input:
   {{ input_json }}
 
-  Return only valid JSON that strictly conforms to the provided JSON Schema.
+  Return only a JSON object with title, summary, and candidate_topics, conforming to the provided schema.
 
 llm_config:
   temperature: 0.0

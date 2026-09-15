@@ -56,7 +56,6 @@ class DocumentCardGenerator:
             retry_step="doc_card_retry",
             doc_id=doc.doc_id,
             resource_uri=doc.resource_uri,
-            title=doc.title,
         )
 
     async def generate_node_card(
@@ -93,7 +92,6 @@ class DocumentCardGenerator:
         retry_step: str,
         doc_id: str,
         resource_uri: str,
-        title: str,
     ) -> DocumentCard:
         content = await self._complete_card_content(
             prompt=prompt,
@@ -107,7 +105,6 @@ class DocumentCardGenerator:
                 **content.model_dump(mode="json"),
                 "doc_id": doc_id,
                 "resource_uri": resource_uri,
-                "title": title,
             }
         )
         if not card.markdown:

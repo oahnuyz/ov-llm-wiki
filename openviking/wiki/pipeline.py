@@ -276,6 +276,7 @@ class WikiPipeline:
                 depth,
                 len(layer_nodes),
             )
+            all_unassigned_source_ids.extend(discovery.source_assignments.unassigned_source_ids)
             if not layer_nodes:
                 logger.info("[Wiki] Depth=%d produced no directory nodes; stopping", depth)
                 break
@@ -311,7 +312,6 @@ class WikiPipeline:
             )
 
             all_source_refs_by_node.update(assignment_result.source_refs_by_node)
-            all_unassigned_source_ids.extend(assignment_result.unassigned_source_ids)
             artifacts.source_refs_by_node = all_source_refs_by_node
             await self.writer.write_internal_json(
                 f"{build_dir(self.config)}source_assignments.json",

@@ -14,7 +14,9 @@ from openviking.wiki.schemas import AggregationCardView, NodeDocument, ResourceD
     "wiki.document_card", "wiki.node_aggregation_agent", "wiki.node_card", "wiki.node_documents",
 ])
 def test_wiki_prompt_templates_render(prompt_id: str):
-    assert '{"example": true}' in PromptManager().render(prompt_id, {"input_json": '{"example": true}'})
+    assert '{"example": true}' in PromptManager().render(
+        prompt_id, {"input_json": '{"example": true}', "has_more_batches": False}
+    )
 
 
 def test_document_card_prompt_uses_only_semantic_input_fields():
@@ -30,30 +32,35 @@ def test_document_card_prompt_uses_only_semantic_input_fields():
     assert "representative named work" in prompt
 
 
-def test_aggregation_agent_prompt_contains_full_nodes_and_unassigned_cards():
+def test_aggregation_agent_prompt_contains_compact_nodes_and_full_unassigned_cards():
     prompt = build_node_aggregation_agent_prompt(
         [{"node_id": "topic", "title": "Topic", "scope": "Topic scope", "cards": [{
-            "card_id": "old_1", "title": "Old", "summary": "Old summary", "candidate_topics": ["Old topic"],
+            "card_id": "old_1", "title": "Old", "candidate_topics": ["Old topic"],
         }]}],
         [AggregationCardView(card_id="new_1", title="New", summary="New summary", candidate_topics=["Topic"])],
         ["create_node: invalid node_id"],
+        has_more_batches=True, read_summaries={},
     )
     assert '"existing_nodes"' in prompt
     assert '"unassigned_cards"' in prompt
     assert '"old_1"' in prompt and '"new_1"' in prompt
     assert "calls execute in order" in prompt
-    assert "finish_layer" in prompt
+    assert "finish" in prompt
     assert "Coherence test" in prompt
+    assert "More new cards will arrive later" in prompt
+    assert "There are no later batches" not in prompt
     assert "drug delivery with biopharmaceutical manufacturing" in prompt
     state, feedback = prompt.split("Previous turn error feedback (tool_errors):")
     assert "create_node: invalid node_id" not in state
     assert "create_node: invalid node_id" in feedback
-    assert prompt.endswith("call finish_layer.")
+    assert prompt.endswith("call finish.")
 
 
 def test_aggregation_prompt_omits_error_feedback_when_no_errors():
-    prompt = build_node_aggregation_agent_prompt([], [], [])
+    prompt = build_node_aggregation_agent_prompt([], [], [], has_more_batches=False, read_summaries={})
     assert "Previous turn error feedback" not in prompt
+    assert "There are no later batches" in prompt
+    assert "More new cards will arrive later" not in prompt
 
 
 def test_node_documents_prompt_uses_only_node_boundary_and_source_sections():
@@ -94,7 +101,7 @@ def test_node_card_prompt_uses_node_boundary_and_generated_documents():
     assert "Retrieved evidence." in prompt
     assert '"document_id"' not in prompt
     assert '"role"' not in prompt
-    assert "do not generate candidate topics" in prompt
+    assert "JSON object with the field summary" in prompt
 
 
 def test_node_card_prompt_is_independent_of_directory_role():

@@ -40,7 +40,7 @@ openviking/wiki/
 ├── cards.py
 │   └── 为资源文档和 Wiki 节点生成 Document Card。
 ├── nodes.py
-│   └── 对完整当前层运行 tool-calling 聚合 agent，并物化目录节点。
+│   └── 对当前层分批运行 tool-calling 聚合 agent，整层结束后物化目录节点。
 ├── assignments.py
 │   └── 把候选物化结果里的来源 ID 确定性转换成 SourceRef。
 ├── documents.py
@@ -65,7 +65,7 @@ openviking/wiki/
 ```text
 资源文档
   -> Document Cards
-  -> 完整层的 tool-calling 聚合
+  -> 每批新增 25 张 card 的 tool-calling 聚合
   -> SourceRef 构造
   -> 节点正文
   -> 节点 card
@@ -74,8 +74,9 @@ openviking/wiki/
 ```
 
 节点发现不直接读所有长文档，而是先读压缩后的 cards。原始文档 card 包含
-`summary + candidate_topics`，node card 包含 `summary + scope`；只有原始文档 card
-由模型生成候选主题。节点正文生成时，再拿该节点被选中的来源文档内容或下层节点
+`title + summary + candidate_topics`，三者均由模型生成。输入含可信原文标题时采用，
+否则生成有依据的描述性标题，不使用乱码文件名或猜测的出版物名称。
+node card 的 `title + scope` 由程序填充，模型只生成 `summary`。节点正文生成时，再拿该节点被选中的来源文档内容或下层节点
 正文内容做综合写作。`WikiNode.scope` 是节点的权威边界，长期保存在 `nodes.json`，
 并继续约束正文生成；node card 的 `summary` 是对 scope 的更具体描述，不替代 scope。
 
@@ -85,13 +86,13 @@ openviking/wiki/
   300 字符时，拒绝整次响应并重试；没有额外字段的短正文不受此规则限制。
 - 正文校验最多尝试 3 次。重试保留原始输入，在 prompt 末尾追加上一次错误与
   JSON 格式纠正要求，不累积旧反馈；三次仍失败则抛出错误。
-- 聚合仅在成功校验并执行 `finish_layer` 后结束当前层。零工具调用（包括
-  `finish_reason=length`）不会被视为完成；截断响应中有效的调用仍执行并保留。
-- 工具错误、零调用与无进展反馈统一放在下一轮 prompt 末尾。连续 3 轮没有
-  实际节点状态变化且未结束时，抛出错误；标题、scope 或成员等状态变化会重置计数。
-  成功调用但状态未变化也计为无进展，每层总上限仍为 50 轮。
-- 每轮聚合操作日志保存返回文本、完整调用列表（含被拒绝的调用）、usage、
-  结束原因及无进展计数，通过现有逐轮回调落盘，后续构建失败也能保留诊断信息。
+- 每批调用 `finish` 后结束；还有新 card 时，一轮执行完后待分配数小于 5 也结束本批。
+  每批最多 40 轮，到上限保留已完成编辑并记录警告。遗留项结转到下一批；最后一批
+  达到上限则结束本层，遗留项作为最终未分配结果，不创建额外批次。
+- 零工具调用（包括 `finish_reason=length`）不会直接当作模型完成；有效调用仍执行，
+  工具错误与零调用反馈放在下一轮 prompt 末尾。已移除连续无进展检测及计数。
+- 每轮日志记录批次、轮次、工具返回、完整模型响应、usage，以及结束原因
+  `finish` / `few_unassigned` / `max_turns`；批次编号不进入模型上下文。
 
 ## 资源输入和文档边界
 
@@ -149,13 +150,13 @@ class ResourceDocumentDraft(StrictModel):
 
 - `relative_uri`：文档相对资源 root 的路径，由 parser 在解析时确定。这是识别文档边界的核心字段。
 - `doc_id`：parser 基于文档名或相对路径归一化得到，Wiki 阶段用它作为内部文档 key。
-- `title`：parser 基于 markdown 标题或文件名得到，Wiki 阶段给模型和人类展示。
+- `title`：parser 基于 markdown 标题或文件名得到，用于资源记录和来源展示。
 
 字段用途：
 
 - `relative_uri` 用来拼出文档资源 URI，例如 `root_uri + relative_uri`。
 - `doc_id` 贯穿 card、node discovery、source assignment 和 `sources/<doc_id>.ref.json`。
-- `title` 进入 Document Card prompt、card markdown 和来源展示。
+- 原始 `title` 保留在资源记录中；Document Card 根据正文输入重新生成 `title`，用于 card markdown 和聚合上下文。
 
 例子：
 
@@ -191,12 +192,20 @@ viking://resources/qasper_30_processed_docs/nested/paper_b
 
 节点从上一层 source cards 中发现。第一层的 source cards 是原始文档 cards，提供
 `candidate_topics`；更高层的 source cards 是下层 node cards，改为直接提供权威
-`scope`。两类 card 都提供 `summary`。每层由一个 tool-calling agent 完成：它在每个
-turn 都看到全部当前层 card 以及已经创建的目录节点，返回一个或多个标准 function
-call；程序按返回顺序立即执行，再把更新后的目录节点和未分配 card 交回下一 turn。
-agent 可创建、增删成员、合并、拆分、重命名或修改 scope，并在没有可信的进一步
-聚合时调用 `finish_layer`。目录节点至少包含两个 card；未分配 card 允许保留，但
-不会进入下一层。详见 `streaming_aggregation_design.md`。
+`scope`。每批输入 25 张新 card，加上之前批次的所有未分配项；允许总数超过 25。
+每轮 prompt 包含是否还有后续批次、全层目录及简略成员、当前完整待分配 card 和本批
+已读 summary。目录成员仅显示 ID、title、candidate_topics 或 scope，隐藏 summary。
+`read_summary(card_ids)` 只读取已输入且当前属于目录的成员 card，不能读取未来 card
+或本层新目录。阅读记录按 ID 去重，批内保留，换批清空。
+
+工具按返回顺序执行。程序根据每个成功编辑返回的成员归属数量变化，只更新受影响的
+card；失去全部归属时立即加入当前批待分配列表并删除阅读记录。若仍有其他目录归属，
+则保持已分配状态。成员被加入目录后从完整待分配列表移除。
+
+agent 可创建、增删成员、合并、拆分、重命名或修改 scope。`finish` 应单独调用，
+程序不执行它后面的调用；最后一批待分配数为 0 时也不按数量自动结束，仍等待
+`finish` 或 40 轮上限。整层结束后先记录未分配结果，再在本层无目录时停止向上聚合。
+目录至少包含两个 card；未分配 card 不会进入更高层。详见 `streaming_aggregation_design.md`。
 
 层结束后，程序才按 `max_cards_per_node` 对过大的目录节点做滑动窗口切分，随后：
 
@@ -376,8 +385,9 @@ client.build_wiki(
 
 | 参数 | 含义 | 默认值 |
 | --- | --- | --- |
-| `aggregation_agent_max_turns` | 每层聚合 agent 最大决策轮数 | `50` |
-| `max_cards_per_node` | 层结束后按滑动窗口切分目录节点时的窗口大小 | `4` |
+| `aggregation_batch_size` | 每批新增 card 数，不含遗留项 | `25` |
+| `aggregation_agent_max_turns` | 每批最大决策轮数，到上限正常结束本批 | `40` |
+| `max_cards_per_node` | 层结束后按滑动窗口切分目录节点时的窗口大小 | `1000` |
 | `max_concurrent_cards` | Document Card 并发生成数 | `10` |
 | `max_concurrent_nodes` | 节点正文和 Node Card 并发生成数 | `10` |
 | `llm_request_timeout_seconds` | 单次 Wiki LLM 请求超时；超时后重试，最多总计 3 次 | `300` |

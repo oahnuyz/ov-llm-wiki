@@ -23,8 +23,8 @@ def _call(name: str, **arguments: object) -> dict:
     return {"name": name, "arguments": arguments}
 
 
-def test_default_aggregation_agent_turn_limit_is_fifty():
-    assert WikiGenerationLimits().aggregation_agent_max_turns == 50
+def test_default_aggregation_agent_turn_limit_is_forty():
+    assert WikiGenerationLimits().aggregation_agent_max_turns == 40
 
 
 def test_default_aggregation_agent_max_tokens_is_12288():
@@ -40,7 +40,7 @@ async def test_agent_receives_full_layer_then_materializes_created_nodes():
     fake_vlm = FakeToolVLM(
         [
             [_call("create_node", node_id="shared_topic", title="Shared Topic", scope="Shared scope", card_ids=["card_1", "card_2"])],
-            [_call("finish_layer")],
+            [_call("finish")],
         ]
     )
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
@@ -56,7 +56,7 @@ async def test_agent_receives_full_layer_then_materializes_created_nodes():
 
 @pytest.mark.asyncio
 async def test_agent_may_finish_without_forcing_any_aggregation():
-    fake_vlm = FakeToolVLM([[_call("finish_layer")]])
+    fake_vlm = FakeToolVLM([[_call("finish")]])
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
 
     result = await runner.discover_layer([_card(1), _card(2)], depth=1)
@@ -71,7 +71,7 @@ async def test_sequential_tool_calls_preserve_dag_overlap():
         [[
             _call("create_node", node_id="topic_a", title="Topic A", scope="A scope", card_ids=["card_1", "card_2"]),
             _call("create_node", node_id="topic_b", title="Topic B", scope="B scope", card_ids=["card_1", "card_3"]),
-        ], [_call("finish_layer")]]
+        ], [_call("finish")]]
     )
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
 
@@ -88,7 +88,7 @@ async def test_invalid_tool_call_is_returned_to_agent_for_correction():
         [
             [_call("add_cards", node_id="missing", card_ids=["card_1"])],
             [_call("create_node", node_id="topic", title="Topic", scope="Topic scope", card_ids=["card_1", "card_2"])],
-            [_call("finish_layer")],
+            [_call("finish")],
         ]
     )
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
@@ -108,7 +108,7 @@ async def test_invalid_merge_does_not_partially_change_nodes():
             _call("create_node", node_id="right", title="Right", scope="Right scope", card_ids=["card_3", "card_4"]),
         ], [
             _call("merge_nodes", target_node_id="left", source_node_ids=["right", "missing"]),
-        ], [_call("finish_layer")]]
+        ], [_call("finish")]]
     )
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
 
@@ -126,7 +126,7 @@ async def test_oversized_nodes_keep_existing_sliding_window_materialization():
     fake_vlm = FakeToolVLM(
         [[
             _call("create_node", node_id="topic", title="Topic", scope="Topic scope", card_ids=["card_1", "card_2", "card_3", "card_4"]),
-        ], [_call("finish_layer")]]
+        ], [_call("finish")]]
     )
     runner = NodeDiscoveryRunner(
         WikiLLMRunner(fake_vlm), WikiConfig(limits=WikiGenerationLimits(max_cards_per_node=3))
@@ -145,7 +145,7 @@ async def test_split_ids_are_unique_across_depths_when_topic_names_repeat():
     fake_vlm = FakeToolVLM(
         [[
             _call("create_node", node_id="topic", title="Topic", scope="Topic scope", card_ids=["card_1", "card_2", "card_3", "card_4"]),
-        ], [_call("finish_layer")]]
+        ], [_call("finish")]]
     )
     runner = NodeDiscoveryRunner(
         WikiLLMRunner(fake_vlm), WikiConfig(limits=WikiGenerationLimits(max_cards_per_node=3))
@@ -166,7 +166,7 @@ async def test_zero_calls_retry_with_feedback_at_prompt_end(finish_reason, conte
     fake_vlm = FakeToolVLM([
         VLMResponse(content=content, finish_reason=finish_reason),
         [_call("create_node", node_id="topic", title="Topic", scope="Scope", card_ids=["card_1", "card_2"])],
-        [_call("finish_layer")],
+        [_call("finish")],
     ])
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
     result = await runner.discover_layer([_card(1), _card(2)], depth=2)
@@ -176,7 +176,7 @@ async def test_zero_calls_retry_with_feedback_at_prompt_end(finish_reason, conte
     feedback = fake_vlm.calls[1].split("Previous turn error feedback (tool_errors):")[1]
     assert f"finish_reason={finish_reason}" in feedback
     assert "No structured tool calls" in feedback
-    assert fake_vlm.calls[1].endswith("call finish_layer.")
+    assert fake_vlm.calls[1].endswith("call finish.")
     assert "Previous turn error feedback" not in fake_vlm.calls[2]
 
 
@@ -192,52 +192,14 @@ async def test_length_response_preserves_valid_calls_and_logs_rejected_calls():
                 ToolCall("bad", "create_node", {"raw": '{"node_id":'}),
             ],
         ),
-        [_call("finish_layer")],
+        [_call("finish")],
     ])
     runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
     result = await runner.discover_layer([_card(1), _card(2)], depth=1)
     assert result.nodes[0].node_id == "topic"
     first = runner.aggregation_logs[0]
-    assert first["finished"] is False and first["made_progress"] is True
+    assert first["finished"] is False
+    assert first["state_after"]["node_ids"] == ["topic"]
     assert len(first["tool_calls"]) == 1
     assert len(first["response"]["tool_calls"]) == 2
     assert first["response"]["usage"]["completion_tokens"] == 12288
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("response", [[], [_call("finish_layer", unexpected=True)]])
-async def test_three_no_progress_turns_fail_after_last_turn_is_persisted(response):
-    fake_vlm = FakeToolVLM([response] * 3)
-    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
-    persisted = []
-
-    async def save(record):
-        persisted.append(record)
-
-    with pytest.raises(RuntimeError, match="no progress for 3 consecutive turns at depth=2"):
-        await runner.discover_layer([_card(1), _card(2)], depth=2, on_turn_complete=save)
-    assert len(fake_vlm.calls) == len(persisted) == 3
-    assert [r["consecutive_no_progress"] for r in persisted] == [1, 2, 3]
-    assert all(not r["finished"] for r in persisted)
-
-
-@pytest.mark.asyncio
-async def test_scope_edits_reset_stall_counter_but_successful_noops_do_not():
-    create = _call("create_node", node_id="topic", title="Topic", scope="Scope", card_ids=["card_1", "card_2"])
-    change = _call("update_node_scope", node_id="topic", scope="Revised scope")
-    fake_vlm = FakeToolVLM([[create], [], [], [change], [change], [change], [_call("finish_layer")]])
-    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
-    result = await runner.discover_layer([_card(1), _card(2)], depth=1)
-    assert result.nodes[0].scope == "Revised scope"
-    assert [r["consecutive_no_progress"] for r in runner.aggregation_logs] == [0, 1, 2, 0, 1, 2, 0]
-
-
-@pytest.mark.asyncio
-async def test_successful_noop_calls_cannot_avoid_stall_limit():
-    create = _call("create_node", node_id="topic", title="Topic", scope="Scope", card_ids=["card_1", "card_2"])
-    noop = _call("add_cards", node_id="topic", card_ids=["card_1"])
-    fake_vlm = FakeToolVLM([[create], [noop], [noop], [noop]])
-    runner = NodeDiscoveryRunner(WikiLLMRunner(fake_vlm), WikiConfig())
-    with pytest.raises(RuntimeError, match="no progress for 3 consecutive turns"):
-        await runner.discover_layer([_card(1), _card(2)], depth=1)
-    assert runner.aggregation_logs[-1]["consecutive_no_progress"] == 3

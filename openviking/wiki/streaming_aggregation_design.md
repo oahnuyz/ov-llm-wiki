@@ -1,42 +1,40 @@
-# Full-Layer Tool-Calling Aggregation
+# Batched Tool-Calling Aggregation
 
 ## Purpose
 
-This design constructs a Wiki from the bottom up. At each depth, a single
-tool-calling agent sees every card in the current layer and incrementally
-builds only the coherent directory nodes warranted by those cards. It may
-leave cards unassigned. Those cards are deliberately not carried into the next
-depth: after a complete agent loop, forcing them upward would create weak or
-overly broad aggregation.
-
-The first layer receives original Document Cards. Each later layer receives
-only the Node Cards created at the preceding depth. Nodes therefore become
-progressively broader as the hierarchy rises.
+Construct the Wiki from the bottom up. Each depth processes cards in sequential
+batches, sharing the directory nodes built so far. Each batch adds 25 new cards
+by default, plus any unassigned cards carried from preceding batches. Original
+Document Cards enter the first depth; only newly generated Node Cards enter
+the next depth. Unassigned cards are recorded but do not move to the next depth.
 
 ## Layer Lifecycle
 
 ```text
 current-layer cards
-  -> agent turn: existing directory nodes + unassigned cards
-  -> ordered function calls, executed immediately
-  -> updated directory nodes + recomputed unassigned cards
-  -> repeat until finish_layer
+  -> introduce up to 25 new cards, retaining previous unassigned cards
+  -> fresh batch context and empty read-summary cache
+  -> agent turn: compact directories + full unassigned cards + read summaries
+  -> execute ordered tools and update affected card memberships
+  -> repeat until finish, fewer than 5 pending with later batches, or 40 turns
+  -> next batch, if any new cards remain
   -> post-layer sliding-window split for oversized nodes
-  -> materialize nodes, source refs, Markdown, and Node Cards
-  -> only new Node Cards enter the next depth
-
-If no directory nodes are materialized at a depth, aggregation stops.
+  -> materialize source refs, Markdown, and Node Cards
+  -> record unassigned cards, including when no directories were created
+  -> stop if no directories exist; otherwise aggregate the new Node Cards
 ```
 
-The agent is limited by `aggregation_agent_max_turns` (default `50`). Hitting
-that limit is an error rather than silently accepting an unfinished layer.
+The batching loop follows the original card order. Leftovers do not consume the
+25-new-card allowance, so a batch can contain more than 25 unassigned cards.
+There are no extra batches containing only leftovers after the last new cards.
 
-## Agent Input
+## Agent Context
 
-Each turn renders one prompt with this state:
+Each turn renders a fresh state snapshot without previous conversational turns:
 
 ```json
 {
+  "has_more_batches": true,
   "existing_nodes": [
     {
       "node_id": "sparse_retrieval",
@@ -45,144 +43,134 @@ Each turn renders one prompt with this state:
       "cards": [
         {
           "card_id": "paper_a",
-          "title": "...",
-          "summary": "...",
-          "candidate_topics": ["..."]
+          "title": "Paper A",
+          "candidate_topics": ["Sparse retrieval"]
         }
       ]
     }
   ],
   "unassigned_cards": [
     {
-      "card_id": "child_node_c",
-      "title": "Child Node C",
-      "summary": "...",
-      "scope": "The precise knowledge boundary of Child Node C."
+      "card_id": "paper_c",
+      "title": "Paper C",
+      "summary": "Complete card summary.",
+      "candidate_topics": ["Retrieval evaluation"]
     }
+  ],
+  "read_summaries": [
+    {"card_id": "paper_a", "summary": "Previously read summary."}
   ]
 }
 ```
 
-`existing_nodes` contains full member card views so the agent can correct an
-earlier grouping. `unassigned_cards` is derived after every tool turn from all
-cards not currently used by any directory node. It is not persisted as an
-independent state object. When the previous turn has errors, a separate
-`tool_errors` feedback block is appended at the very end of the prompt, after
-the rendered template. It contains the latest tool validation, zero-call, or
-no-progress feedback and is replaced rather than accumulated on later turns.
+The example abbreviates directory membership; actual directories require at
+least two distinct cards. Member cards show ID, title, and candidate topics
+for documents or scope for Node Cards. Their summaries are hidden. Pending
+cards show the same fields plus summary. No batch number enters the prompt.
 
-The input holds semantic card data only. Original document cards carry
-`candidate_topics`; generated Wiki node cards carry their authoritative
-`scope` instead. It never includes source Markdown, raw chunks, or resource
-storage metadata.
+`read_summary` accepts one or more introduced card IDs that currently belong
+to at least one directory. It cannot read pending cards, future cards, or the
+new directories themselves: their Node Cards do not exist until materialization.
+All IDs are validated before any summary is cached. Repeated reads are deduplicated.
+The cache persists for the current batch and is cleared at the next batch.
 
-## Ordered Tool Operations
+When a card becomes unassigned, its full view returns to the pending list and
+its read-cache entry is deleted immediately, even if another tool reassigns it
+later in the same response. Assignment removes the full pending view; an existing
+read-cache entry otherwise stays until the batch ends.
 
-The provider returns standard function calls. The program validates and
-executes them in their returned order, so later calls in one response observe
-the effect of earlier calls.
+Only the latest turn's tool errors or zero-tool-call feedback are appended to
+the next prompt. There is no consecutive-no-progress counter or failure rule.
+The prompt explicitly says more new cards will arrive when appropriate; the
+last batch instead says all cards have arrived and requests `finish` even when
+no cards remain pending.
+
+## Ordered Tools and Incremental Membership
+
+Calls execute in response order. Invalid calls leave state unchanged and
+produce feedback for the next turn.
 
 | Tool | Required fields | Effect |
 | --- | --- | --- |
-| `create_node` | `node_id`, `title`, `scope`, `card_ids` | Create a directory node from at least two known cards. |
-| `add_cards` | `node_id`, `card_ids` | Add known cards to a node. Existing membership elsewhere remains, allowing DAG overlap. |
-| `remove_cards` | `node_id`, `card_ids` | Remove member cards while retaining at least two cards. |
-| `merge_nodes` | `target_node_id`, `source_node_ids` | Union source members into the target and remove the source nodes. |
-| `split_node` | `node_id`, `groups` | Replace one node with two or more groups; every original card must remain in at least one group. Groups may overlap. |
-| `rename_node` | `node_id`, `title` | Rename a node. |
-| `update_node_scope` | `node_id`, `scope` | Change a node's knowledge boundary. |
-| `finish_layer` | none | Finish the current depth. It should be called alone after earlier edits are complete. |
+| `create_node` | `node_id`, `title`, `scope`, `card_ids` | Create a coherent directory from at least two introduced cards. |
+| `add_cards` | `node_id`, `card_ids` | Add cards, allowing membership in multiple directories. |
+| `remove_cards` | `node_id`, `card_ids` | Remove members while retaining at least two cards. |
+| `merge_nodes` | `target_node_id`, `source_node_ids` | Union members into the target and remove source directories. |
+| `split_node` | `node_id`, `groups` | Replace a directory with at least two groups; preserve every original member. Groups may overlap. |
+| `rename_node` | `node_id`, `title` | Rename a directory. |
+| `update_node_scope` | `node_id`, `scope` | Update a directory's knowledge boundary. |
+| `read_summary` | `card_ids` | Read hidden summaries of directory member cards. |
+| `finish` | none | End this batch; calls later in the same response are ignored. |
 
-`node_id` is a stable lowercase identifier of letters, digits, and underscores.
-The agent may only use supplied card IDs and existing node IDs. Invalid calls
-are rejected without changing state and are returned in `tool_errors` on the
-next turn.
+Each introduced card has a membership count. Editing tools return count deltas
+only for cards affected by the edit. Create/add increment newly established
+memberships; remove decrements removed memberships. Merge/split compute net
+deltas across the affected directories, preserving DAG overlap. Rename/scope
+edits return no deltas. State updates do not scan unrelated cards or directories.
 
-## Semantic Rules
-
-- A directory node must contain at least two distinct cards and represent a
-  specific coherent topic, not a common keyword or broad catch-all category.
-- Nodes are editable for the entire layer. The agent can revise scope,
-  membership, or structure after inspecting all relevant cards.
-- A card may appear in multiple substantively different nodes. This preserves
-  the Wiki DAG while prohibiting near-duplicate nodes.
-- A card that has no credible relation to another card remains unassigned. It
-  does not become a singleton node and does not pass into the next layer.
-- The agent must not force a grouping merely to cover every card. It calls
-  `finish_layer` once no useful aggregation or correction remains.
-
-There are no `pending`, `provisional`, `active`, or rejection states. A node
-either exists as a valid directory node or does not exist.
-
-## Post-Layer Splitting
-
-`max_cards_per_node` controls only post-layer materialization, not agent
-reasoning. If a finalized node has more members than the configured maximum,
-the program divides its ordered members with a sliding window. For maximum
-size `M`, each child window contains up to `M` cards and the cursor advances by
-`M - 1`, so neighboring windows share one boundary card. The generated node
-IDs include both depth and part number, such as `_d1_1` and `_d2_1`, so a
-repeated topic name at a higher layer cannot collide with a lower-layer split.
-
-For `M = 4` and cards `[a, b, c, d, e, f, g]`, the materialized nodes contain:
+A count reaching zero immediately restores the card to the current pending
+list. A positive count removes it from that list. This maintains the invariant:
 
 ```text
-[a, b, c, d]
-         [d, e, f, g]
+pending = introduced cards - cards belonging to at least one directory
 ```
 
-The overlap preserves local context while bounding the source content used
-for each node body.
+Rendering the complete directory list still visits its members each turn;
+incremental membership tracking avoids a separate full-layer assignment scan.
+Batching reduces summary volume but does not place a fixed bound on context:
+leftovers, directory membership, and explicitly read summaries can still grow.
 
-## Materialization And Stopping
+## Batch Completion
 
-Only a validated and executed `finish_layer` call completes a layer. A response
-without structured tool calls never completes it, even with `finish_reason=length`.
-Valid calls in truncated responses still execute; errors are fed back next turn.
-Three consecutive turns without an actual node state change or a valid finish
-cause an explicit failure. Changes to titles, scopes, or membership reset this
-counter; successful no-op calls do not. The existing 50-turn cap also remains.
+After executing the ordered calls for one model response, end the batch when:
 
-For every finalized directory node, the fixed program creates `SourceRef`
-entries from its validated card IDs, generates its Markdown documents, and
-generates a Node Card. The next depth receives precisely those new Node Cards.
-Unassigned current-layer cards are recorded in `source_assignments.json` but
-are excluded from the next depth.
+1. A valid `finish` was executed; later calls in that response are ignored.
+2. Otherwise, the per-batch decision-round limit (default 40) was reached.
+3. Otherwise, fewer than 5 cards remain pending and more new cards exist.
 
-If the agent finishes a layer without creating any valid directory node, there
-are no Node Cards to aggregate and the complete Wiki build stops. There is no
-fixed depth limit and no separate model judgement about whether to continue.
+At the round limit, retain valid edits, record the end reason and a warning,
+and continue with the next batch. At the last batch, retain remaining cards
+as the final unassigned result and finish the layer. Fewer than 5 pending cards
+never automatically ends the last batch, even when the count is zero.
+A response without tool calls does not count as `finish`; it consumes a round
+and produces feedback. Valid calls in truncated responses still execute.
 
-## Observability
+## Materialization and Stopping
 
-Every agent turn is appended to:
+After all batches, oversized directories are split with sliding windows using
+`max_cards_per_node`. For maximum size M, the window advances by M - 1, sharing
+one boundary card with its neighbor. Split IDs contain depth and part number.
+This bounds source content per node body, not aggregation context size.
 
-```text
-viking://wiki/run/aggregation_operations.jsonl
-```
+The program then constructs SourceRefs, generates node Markdown, and creates
+Node Cards. Model output supplies only Node Card summary; title and scope come
+from the directory. Initial Document Cards instead generate title, summary,
+and candidate topics from the document input, without copying a garbled filename.
 
-Each record includes depth, turn, executed function calls, validation errors,
-the node/unassigned-card state before and after execution, and whether the
-layer was finished. It also includes `made_progress`, `consecutive_no_progress`,
-and a `response` payload with returned text, all calls (including rejected ones),
-finish reason, and usage. The existing per-turn callback persists this record
-before a stall error is raised, so later build failures do not lose the response.
-This is the adapter's response payload, not raw HTTP bytes. The regular Wiki
-logs also retain the rendered prompt, tool schema, and request metadata on
-successful completion.
+Only the new Node Cards enter the next depth. Every layer's unassigned IDs are
+collected in the final `source_assignments.json`, including the empty layer
+that ends upward aggregation. If no directories exist at the end of a layer,
+the complete aggregation stops.
 
-## Configuration
+## Observability and Configuration
+
+Every turn is persisted through the existing callback to
+`viking://wiki/run/aggregation_operations.jsonl`. Records include depth,
+batch index, turn within batch, whether more batches exist, executed calls
+and read results, errors, before/after state summaries, and batch end reason
+(`finish`, `few_unassigned`, or `max_turns`). The response payload includes
+text, all returned calls, finish reason, and usage. Batch indices are for logs only.
 
 ```python
 WikiGenerationLimits(
-    aggregation_agent_max_turns=50,
-    max_cards_per_node=4,
+    aggregation_batch_size=25,
+    aggregation_agent_max_turns=40,
+    max_cards_per_node=1000,
     max_concurrent_cards=10,
     max_concurrent_nodes=10,
     llm_request_timeout_seconds=300.0,
 )
 ```
 
-`max_concurrent_cards` and `max_concurrent_nodes` govern independent LLM calls
-for card and node-content generation. They do not batch or limit the cards
-shown to the aggregation agent.
+Concurrency settings apply to independent card and node-content generation.
+Aggregation batches and their tools execute sequentially.

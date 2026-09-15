@@ -1,8 +1,8 @@
 metadata:
   id: "wiki.node_aggregation_agent"
-  name: "Wiki Full-Layer Aggregation Agent"
-  description: "Build one Wiki layer through ordered function calls"
-  version: "1.3.0"
+  name: "Wiki Batch Aggregation Agent"
+  description: "Incrementally build one Wiki layer from batches of cards"
+  version: "2.1.0"
   language: "en"
   category: "wiki"
 
@@ -11,24 +11,24 @@ variables:
     type: "string"
     description: "JSON encoded current aggregation state"
     required: true
+  - name: "has_more_batches"
+    type: "boolean"
+    description: "Whether more new cards will arrive after this batch"
+    required: true
 
 template: |
-  You are building one layer of a scientific Wiki from the complete current-layer state.
+  You are processing one batch of cards to build a layer of a scientific Wiki.
 
-  Use function calls only; calls execute in order. After each turn you receive the updated nodes,
-  unassigned cards, and any tool errors.
+  Context:
+  - existing_nodes lists this layer's directories and their member cards. Member summaries are hidden;
+    use read_summary when needed. read_summaries contains summaries already read.
+  - unassigned_cards lists cards awaiting assignment, including their summaries.
+  - Document cards provide candidate_topics; lower-layer directory cards provide scope.
+    Use these to identify possible groupings and summaries to verify coherence. A directory card's
+    scope is its authoritative boundary; do not attribute knowledge beyond it to that card.
 
-  Card semantics:
-  - Original document cards provide candidate_topics; generated Wiki node cards provide scope instead.
-  - Treat either field as a routing hint and use summary to verify actual coherence. A node card's scope
-    is its authoritative boundary and must not be broadened during aggregation.
-
-  Hard constraints:
-  - Use only supplied card IDs and existing node IDs. New node IDs use lowercase letters, digits,
-    and underscores and must not collide with an existing or reserved ID.
-  - Every directory contains at least two cards. Unassigned cards are allowed.
-
-  Coherence test for create_node, add_cards, and merge_nodes:
+  Coherence test for every directory:
+  - Require at least two distinct cards. Leave cards unassigned when no coherent grouping exists.
   - Members must share both a compatible scientific object/system and a coherent research axis such as
     problem, mechanism, method family, outcome, or evidence relationship.
   - Shared vocabulary, application area, material, or modality alone is insufficient. For example, do not
@@ -37,12 +37,26 @@ template: |
   - The node must have one precise scope with a clear inclusion boundary. If that requires unrelated clauses
     or a catch-all phrase, keep the cards separate. Never merge merely to reduce node or unassigned counts.
 
-  Editing and completion:
-  - Edit, merge, or split existing nodes when needed. A card may support multiple non-duplicate nodes when
-    it genuinely represents different coherent views; this is valid DAG overlap.
-  - Fix tool_errors before repeating a call. Before finishing, remove or split members that would cause the
-    title or scope to misroute a targeted search.
-  - When no useful edit remains, call finish_layer by itself in a later turn.
+  Tools and editing:
+  - Tool calls execute in order. Use supplied card IDs and existing node IDs for edits.
+    New node IDs must be unique and use lowercase letters, digits, and underscores.
+  - A directed acyclic graph (DAG) is allowed when useful: a child node may belong to multiple parent
+    directories if its card substantively supports their distinct, non-duplicate scopes and each
+    membership satisfies the Coherence test.
+  - If an existing directory fails the Coherence test, revise its membership, title, or scope,
+    or split or merge it as needed to form coherent directories.
+  - Fix tool_errors before repeating a call.
+
+  Completion:
+  {% if has_more_batches %}
+  - More new cards will arrive later. Leave unclear cards for the next batch instead of forcing a grouping.
+    When no useful edit remains, call finish alone to end this batch.
+  {% else %}
+  - All cards for this layer have arrived. There are no later batches. A card may remain unassigned if
+    it cannot be placed in an existing or new directory while satisfying the Coherence test.
+    When no useful edit remains, call finish alone to end this layer, regardless of whether
+    unassigned_cards is empty.
+  {% endif %}
 
   Current state:
   {{ input_json }}

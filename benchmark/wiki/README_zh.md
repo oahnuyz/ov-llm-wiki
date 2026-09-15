@@ -378,6 +378,11 @@ PDF 文本缓存在 `vector_store` 的同级 `full_document_texts/` 中；原文
 摘要或分批。当前没有模型 tokenizer 预检查，运行前需确认模型能容纳单篇全文及输出。
 ScholarQA-Multi 的原始 TXT 是官方引用片段合并文档，完整读取不等于获取了论文全文。
 
+初始 card 的 `title`、`summary` 和 `candidate_topics` 均由模型根据输入生成；
+目录 card 的 `title` 和 `scope` 由程序填充。目录聚合每批默认加入 25 张新 card，
+此前未分配项额外结转，每批最多 40 轮。已分配成员隐藏 summary，按需通过
+`read_summary` 阅读；阅读记录只在本批保留。最后一批结束后的遗留项记为本层未分配结果。
+
 `gen`：
 
 - 启动一个临时 OpenViking server。

@@ -33,22 +33,32 @@ def build_node_aggregation_agent_prompt(
     existing_nodes: list[dict],
     unassigned_cards: list[AggregationCardView],
     tool_errors: list[str],
+    *,
+    has_more_batches: bool,
+    read_summaries: dict[str, str],
 ) -> str:
-    """Build one full-layer tool-calling aggregation agent turn."""
+    """Build the current batch state without retaining earlier batch history."""
     inputs = {
+        "has_more_batches": has_more_batches,
         "existing_nodes": existing_nodes,
         "unassigned_cards": [
             card.model_dump(mode="json", exclude_none=True) for card in unassigned_cards
         ],
+        "read_summaries": [
+            {"card_id": card_id, "summary": summary}
+            for card_id, summary in read_summaries.items()
+        ],
     }
-    prompt = _render_wiki_prompt("wiki.node_aggregation_agent", inputs)
+    prompt = _render_wiki_prompt(
+        "wiki.node_aggregation_agent", inputs, has_more_batches=has_more_batches
+    )
     if tool_errors:
         prompt = (
             f"{prompt.rstrip()}\n\nPrevious turn error feedback (tool_errors):\n"
             f"{json.dumps(tool_errors, ensure_ascii=False, indent=2)}\n"
-            "The layer is not finished. Correct the errors using the current state above. "
+            "The batch is not finished. Correct the errors using the current state above. "
             "Return structured function calls, not explanatory text. If no useful edit "
-            "remains, call finish_layer."
+            "remains, call finish."
         )
     return prompt
 

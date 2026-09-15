@@ -1,10 +1,10 @@
-"""Discover one Wiki layer through a full-state tool-calling agent loop."""
+"""Discover one Wiki layer through sequential batches of tool-calling agent loops."""
 
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,12 +16,14 @@ from .prompts import build_node_aggregation_agent_prompt
 from .schemas import (
     AddCardsToolArgs,
     AggregationCardView,
+    AggregationMemberView,
     AggregationNodeView,
     CreateNodeToolArgs,
     DocumentCard,
-    FinishLayerToolArgs,
+    FinishToolArgs,
     MergeNodesToolArgs,
     NodeCard,
+    ReadSummaryToolArgs,
     RemoveCardsToolArgs,
     RenameNodeToolArgs,
     SourceAssignmentItem,
@@ -32,7 +34,6 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
-MAX_CONSECUTIVE_NO_PROGRESS_TURNS = 3
 
 
 @dataclass
@@ -50,7 +51,7 @@ class NodeDiscoveryResult:
 
 
 class NodeDiscoveryRunner:
-    """Run a stateful function-calling agent over one complete Wiki layer."""
+    """Share directory state across independent card-batch agent loops."""
 
     def __init__(self, llm: WikiLLMRunner, config: WikiConfig):
         self.llm = llm
@@ -67,102 +68,131 @@ class NodeDiscoveryRunner:
     ) -> NodeDiscoveryResult:
         if not cards:
             return NodeDiscoveryResult([], SourceAssignmentResponse(assignments=[]))
-        cards_by_id = {card.doc_id: card for card in cards}
-        if len(cards_by_id) != len(cards):
+        if len({card.doc_id for card in cards}) != len(cards):
             raise RuntimeError("current aggregation layer contains duplicate card IDs")
 
         reserved_ids = set(reserved_node_ids or set())
         nodes: dict[str, AggregationNodeState] = {}
-        tool_errors: list[str] = []
-        consecutive_no_progress = 0
+        introduced: dict[str, DocumentCard | NodeCard] = {}
+        pending: dict[str, DocumentCard | NodeCard] = {}
+        membership_counts: dict[str, int] = {}
+        batch_size = max(1, self.config.limits.aggregation_batch_size)
         max_turns = max(1, self.config.limits.aggregation_agent_max_turns)
 
-        for turn in range(1, max_turns + 1):
-            prompt = build_node_aggregation_agent_prompt(
-                self._node_views(nodes, cards_by_id),
-                self._unassigned_card_views(nodes, cards_by_id),
-                tool_errors,
-            )
-            response = await self.llm.complete_tool_calls(
-                step="node_aggregation_agent", prompt=prompt, tools=_AGGREGATION_TOOLS
-            )
-            state_before = self._state_summary(nodes, cards_by_id)
-            nodes_before = deepcopy(nodes)
-            turn_errors: list[str] = []
-            executed_calls: list[dict[str, Any]] = []
-            finished = False
-            if not response.tool_calls:
-                turn_errors.append(
-                    f"No structured tool calls were returned (finish_reason={response.finish_reason}). "
-                    "This does not finish the layer. Continue editing with function calls, "
-                    "or call finish_layer if no useful edit remains."
-                )
+        for batch_index, start in enumerate(range(0, len(cards), batch_size), start=1):
+            new_cards = cards[start : start + batch_size]
+            for card in new_cards:
+                introduced[card.doc_id] = card
+                pending[card.doc_id] = card
+                membership_counts[card.doc_id] = 0
+            has_more_batches = start + batch_size < len(cards)
+            read_summaries: dict[str, str] = {}
+            tool_errors: list[str] = []
 
-            for call in response.tool_calls:
-                record = {"id": call.id, "name": call.name, "arguments": call.arguments}
-                try:
-                    if call.name == "finish_layer":
-                        FinishLayerToolArgs.model_validate(call.arguments)
-                        executed_calls.append(record)
-                        finished = True
-                        break
-                    self._execute_tool_call(
-                        call.name, call.arguments, nodes, cards_by_id, reserved_ids
+            for turn in range(1, max_turns + 1):
+                prompt = build_node_aggregation_agent_prompt(
+                    self._node_views(nodes, introduced),
+                    [self._card_view(card) for card in pending.values()],
+                    tool_errors,
+                    has_more_batches=has_more_batches,
+                    read_summaries=read_summaries,
+                )
+                response = await self.llm.complete_tool_calls(
+                    step="node_aggregation_agent", prompt=prompt, tools=_AGGREGATION_TOOLS
+                )
+                state_before = self._state_summary(nodes, pending)
+                turn_errors: list[str] = []
+                executed_calls: list[dict[str, Any]] = []
+                end_reason: str | None = None
+                if not response.tool_calls:
+                    turn_errors.append(
+                        f"No structured tool calls were returned (finish_reason={response.finish_reason}). "
+                        "Continue editing with function calls, or call finish if no useful edit remains."
                     )
-                    executed_calls.append(record)
-                except (RuntimeError, ValidationError, ValueError) as exc:
-                    turn_errors.append(f"{call.name}: {exc}")
 
-            made_progress = nodes != nodes_before
-            consecutive_no_progress = (
-                0 if made_progress or finished else consecutive_no_progress + 1
-            )
-            if consecutive_no_progress:
-                turn_errors.append(
-                    f"No node state change for {consecutive_no_progress} consecutive turn(s); "
-                    f"the run fails after {MAX_CONSECUTIVE_NO_PROGRESS_TURNS}. "
-                    "Make a useful edit or explicitly call finish_layer."
+                for call in response.tool_calls:
+                    record = {"id": call.id, "name": call.name, "arguments": call.arguments}
+                    try:
+                        if call.name == "finish":
+                            FinishToolArgs.model_validate(call.arguments)
+                            executed_calls.append(record)
+                            end_reason = "finish"
+                            break
+                        if call.name == "read_summary":
+                            args = ReadSummaryToolArgs.model_validate(call.arguments)
+                            card_ids = self._valid_card_ids(args.card_ids, introduced)
+                            if any(membership_counts[card_id] == 0 for card_id in card_ids):
+                                raise RuntimeError("read_summary may only read directory member cards")
+                            for card_id in card_ids:
+                                read_summaries[card_id] = introduced[card_id].summary
+                            record["result"] = [
+                                {"card_id": card_id, "summary": read_summaries[card_id]}
+                                for card_id in card_ids
+                            ]
+                        else:
+                            deltas = self._execute_tool_call(
+                                call.name, call.arguments, nodes, introduced, reserved_ids
+                            )
+                            # Only cards affected by this successful edit are examined.
+                            for card_id, delta in deltas.items():
+                                if not delta:
+                                    continue
+                                membership_counts[card_id] += delta
+                                if membership_counts[card_id] == 0:
+                                    pending[card_id] = introduced[card_id]
+                                    read_summaries.pop(card_id, None)
+                                else:
+                                    pending.pop(card_id, None)
+                        executed_calls.append(record)
+                    except (RuntimeError, ValidationError, ValueError) as exc:
+                        turn_errors.append(f"{call.name}: {exc}")
+
+                # Evaluate forced exits after executing the whole turn, never mid-edit.
+                if end_reason is None:
+                    if turn == max_turns:
+                        end_reason = "max_turns"
+                    elif has_more_batches and len(pending) < 5:
+                        end_reason = "few_unassigned"
+                log_record = {
+                    "step": "node_aggregation_agent",
+                    "depth": depth,
+                    "batch_index": batch_index,
+                    "turn": turn,
+                    "has_more_batches": has_more_batches,
+                    "finish_reason": response.finish_reason,
+                    "tool_calls": executed_calls,
+                    "tool_errors": turn_errors,
+                    "state_before": state_before,
+                    "state_after": self._state_summary(nodes, pending),
+                    "finished": end_reason is not None,
+                    "batch_end_reason": end_reason,
+                    "response": _tool_response_payload(response),
+                }
+                self.aggregation_logs.append(log_record)
+                if on_turn_complete is not None:
+                    await on_turn_complete(log_record)
+                logger.info(
+                    "[Wiki] Aggregation depth=%d batch=%d turn=%d nodes=%d unassigned=%d end=%s",
+                    depth, batch_index, turn, len(nodes), len(pending), end_reason,
                 )
-            log_record = {
-                "step": "node_aggregation_agent",
-                "depth": depth,
-                "turn": turn,
-                "finish_reason": response.finish_reason,
-                "tool_calls": executed_calls,
-                "tool_errors": turn_errors,
-                "state_before": state_before,
-                "state_after": self._state_summary(nodes, cards_by_id),
-                "finished": finished,
-                "made_progress": made_progress,
-                "consecutive_no_progress": consecutive_no_progress,
-                # Persist the returned text and all calls, including rejected calls,
-                # through the existing per-turn callback even if a later stage fails.
-                "response": _tool_response_payload(response),
-            }
-            self.aggregation_logs.append(log_record)
-            if on_turn_complete is not None:
-                await on_turn_complete(log_record)
-            logger.info(
-                "[Wiki] Aggregation agent depth=%d turn=%d nodes=%d unassigned=%d calls=%d finished=%s",
-                depth, turn, len(nodes), len(self._unassigned_card_ids(nodes, cards_by_id)),
-                len(executed_calls), finished,
-            )
-            if finished:
-                break
-            if consecutive_no_progress >= MAX_CONSECUTIVE_NO_PROGRESS_TURNS:
-                raise RuntimeError(
-                    f"aggregation agent made no progress for {consecutive_no_progress} "
-                    f"consecutive turns at depth={depth}; finish_layer was not called"
-                )
-            tool_errors = turn_errors
-        else:
-            raise RuntimeError(f"aggregation agent exceeded max turns ({max_turns}) at depth={depth}")
+                if end_reason == "max_turns":
+                    logger.warning(
+                        "[Wiki] Aggregation depth=%d batch=%d reached %d turns; "
+                        "%d unassigned cards %s",
+                        depth, batch_index, max_turns, len(pending),
+                        "carry into the next batch" if has_more_batches else "remain unassigned in this layer",
+                    )
+                if end_reason is not None:
+                    break
+                tool_errors = turn_errors
 
         materialized = self._split_oversized_nodes(
             list(nodes.values()), depth=depth, reserved_node_ids=reserved_ids
         )
         if not materialized:
-            return NodeDiscoveryResult([], SourceAssignmentResponse(assignments=[]))
+            return NodeDiscoveryResult([], SourceAssignmentResponse(
+                assignments=[], unassigned_source_ids=list(pending),
+            ))
         wiki_nodes = self._build_nodes(materialized, depth, reserved_ids)
         assignments = [
             SourceAssignmentItem(
@@ -176,7 +206,7 @@ class NodeDiscoveryRunner:
             nodes=wiki_nodes,
             source_assignments=SourceAssignmentResponse(
                 assignments=assignments,
-                unassigned_source_ids=self._unassigned_card_ids(nodes, cards_by_id),
+                unassigned_source_ids=list(pending),
             ),
         )
 
@@ -187,7 +217,8 @@ class NodeDiscoveryRunner:
         nodes: dict[str, AggregationNodeState],
         cards_by_id: dict[str, DocumentCard | NodeCard],
         reserved_ids: set[str],
-    ) -> None:
+    ) -> dict[str, int]:
+        """Apply a validated edit and return membership deltas for affected cards only."""
         if name == "create_node":
             args = CreateNodeToolArgs.model_validate(arguments)
             if args.node_id in nodes or args.node_id in reserved_ids:
@@ -196,25 +227,27 @@ class NodeDiscoveryRunner:
                 args.node_id, args.title, args.scope,
                 self._valid_card_ids(args.card_ids, cards_by_id, minimum=2),
             )
-            return
+            return {card_id: 1 for card_id in nodes[args.node_id].card_ids}
         if name == "add_cards":
             args = AddCardsToolArgs.model_validate(arguments)
             node = self._node(nodes, args.node_id)
-            node.card_ids = list(dict.fromkeys([
-                *node.card_ids, *self._valid_card_ids(args.card_ids, cards_by_id)
-            ]))
-            return
+            valid_ids = self._valid_card_ids(args.card_ids, cards_by_id)
+            existing = set(node.card_ids)
+            added = [card_id for card_id in valid_ids if card_id not in existing]
+            node.card_ids.extend(added)
+            return {card_id: 1 for card_id in added}
         if name == "remove_cards":
             args = RemoveCardsToolArgs.model_validate(arguments)
             node = self._node(nodes, args.node_id)
-            removed = set(self._valid_card_ids(args.card_ids, cards_by_id))
+            removed_ids = self._valid_card_ids(args.card_ids, cards_by_id)
+            removed = set(removed_ids)
             if not removed.issubset(node.card_ids):
                 raise RuntimeError("remove_cards may only remove cards assigned to the node")
             remaining = [card_id for card_id in node.card_ids if card_id not in removed]
             if len(remaining) < 2:
                 raise RuntimeError("remove_cards may not leave a directory node with fewer than two cards")
             node.card_ids = remaining
-            return
+            return {card_id: -1 for card_id in removed_ids}
         if name == "merge_nodes":
             args = MergeNodesToolArgs.model_validate(arguments)
             target = self._node(nodes, args.target_node_id)
@@ -226,10 +259,14 @@ class NodeDiscoveryRunner:
                 *target.card_ids,
                 *(card_id for source in source_nodes for card_id in source.card_ids),
             ]))
+            deltas = Counter(merged_card_ids)
+            deltas.subtract(target.card_ids)
+            for source in source_nodes:
+                deltas.subtract(source.card_ids)
             target.card_ids = merged_card_ids
             for source_id in source_ids:
                 del nodes[source_id]
-            return
+            return dict(deltas)
         if name == "split_node":
             args = SplitNodeToolArgs.model_validate(arguments)
             original = self._node(nodes, args.node_id)
@@ -251,17 +288,19 @@ class NodeDiscoveryRunner:
                 groups.append(AggregationNodeState(group.node_id, group.title, group.scope, card_ids))
             if covered != original_ids:
                 raise RuntimeError("split_node must preserve every original card")
+            deltas = Counter(card_id for group in groups for card_id in group.card_ids)
+            deltas.subtract(original.card_ids)
             del nodes[args.node_id]
             nodes.update({group.node_id: group for group in groups})
-            return
+            return dict(deltas)
         if name == "rename_node":
             args = RenameNodeToolArgs.model_validate(arguments)
             self._node(nodes, args.node_id).title = args.title
-            return
+            return {}
         if name == "update_node_scope":
             args = UpdateNodeScopeToolArgs.model_validate(arguments)
             self._node(nodes, args.node_id).scope = args.scope
-            return
+            return {}
         raise RuntimeError(f"unsupported aggregation tool: {name}")
 
     @staticmethod
@@ -330,15 +369,20 @@ class NodeDiscoveryRunner:
         return nodes
 
     @staticmethod
-    def _card_view(card: DocumentCard | NodeCard) -> AggregationCardView:
+    def _member_view(card: DocumentCard | NodeCard) -> AggregationMemberView:
         common = {
             "card_id": card.doc_id,
             "title": card.title,
-            "summary": card.summary,
         }
         if isinstance(card, NodeCard):
-            return AggregationCardView(**common, scope=card.scope)
-        return AggregationCardView(**common, candidate_topics=card.candidate_topics)
+            return AggregationMemberView(**common, scope=card.scope)
+        return AggregationMemberView(**common, candidate_topics=card.candidate_topics)
+
+    @classmethod
+    def _card_view(cls, card: DocumentCard | NodeCard) -> AggregationCardView:
+        return AggregationCardView(
+            **cls._member_view(card).model_dump(exclude_none=True), summary=card.summary
+        )
 
     def _node_views(
         self,
@@ -348,34 +392,19 @@ class NodeDiscoveryRunner:
         return [
             AggregationNodeView(
                 node_id=node.node_id, title=node.title, scope=node.scope,
-                cards=[self._card_view(cards_by_id[card_id]) for card_id in node.card_ids],
+                cards=[self._member_view(cards_by_id[card_id]) for card_id in node.card_ids],
             ).model_dump(mode="json", exclude_none=True)
             for node in nodes.values()
         ]
 
-    def _unassigned_card_views(
-        self,
-        nodes: dict[str, AggregationNodeState],
-        cards_by_id: dict[str, DocumentCard | NodeCard],
-    ) -> list[AggregationCardView]:
-        return [self._card_view(cards_by_id[card_id]) for card_id in self._unassigned_card_ids(nodes, cards_by_id)]
-
     @staticmethod
-    def _unassigned_card_ids(
-        nodes: dict[str, AggregationNodeState],
-        cards_by_id: dict[str, DocumentCard | NodeCard],
-    ) -> list[str]:
-        assigned = {card_id for node in nodes.values() for card_id in node.card_ids}
-        return [card_id for card_id in cards_by_id if card_id not in assigned]
-
     def _state_summary(
-        self,
         nodes: dict[str, AggregationNodeState],
-        cards_by_id: dict[str, DocumentCard | NodeCard],
+        pending: dict[str, DocumentCard | NodeCard],
     ) -> dict[str, Any]:
         return {
             "node_ids": list(nodes), "node_count": len(nodes),
-            "unassigned_card_ids": self._unassigned_card_ids(nodes, cards_by_id),
+            "unassigned_card_ids": list(pending),
         }
 
 
@@ -398,5 +427,6 @@ _AGGREGATION_TOOLS = [
     _tool("split_node", "Replace one mixed directory node with coherent nodes.", SplitNodeToolArgs),
     _tool("rename_node", "Rename an existing directory node.", RenameNodeToolArgs),
     _tool("update_node_scope", "Update an existing directory node scope.", UpdateNodeScopeToolArgs),
-    _tool("finish_layer", "Finish the aggregation layer after all useful edits are complete.", FinishLayerToolArgs),
+    _tool("read_summary", "Read summaries of existing directory member cards in this layer.", ReadSummaryToolArgs),
+    _tool("finish", "Finish this batch; leave unclear cards unassigned. Call alone.", FinishToolArgs),
 ]

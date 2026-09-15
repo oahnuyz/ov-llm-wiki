@@ -68,15 +68,15 @@ async def test_wiki_llm_runner_stops_after_three_network_attempts():
 
 @pytest.mark.asyncio
 async def test_wiki_llm_runner_returns_tool_calls_without_json_parsing():
-    fake_vlm = FakeToolVLM([[{"name": "finish_layer", "arguments": {}}]])
+    fake_vlm = FakeToolVLM([[{"name": "finish", "arguments": {}}]])
     response = await WikiLLMRunner(fake_vlm).complete_tool_calls(
         step="agent",
         prompt="p",
-        tools=[{"type": "function", "function": {"name": "finish_layer", "parameters": {}}}],
+        tools=[{"type": "function", "function": {"name": "finish", "parameters": {}}}],
     )
 
     assert response.finish_reason == "tool_calls"
-    assert response.tool_calls[0].name == "finish_layer"
+    assert response.tool_calls[0].name == "finish"
 
 
 @pytest.mark.asyncio
@@ -84,7 +84,7 @@ async def test_tool_call_log_serializes_provider_usage_models():
     class PromptTokensDetails(BaseModel):
         cached_tokens: int
 
-    fake_vlm = FakeToolVLM([[{"name": "finish_layer", "arguments": {}}]])
+    fake_vlm = FakeToolVLM([[{"name": "finish", "arguments": {}}]])
     original_complete = fake_vlm.complete_tools_async
 
     async def complete_with_usage(**kwargs):
@@ -101,7 +101,7 @@ async def test_tool_call_log_serializes_provider_usage_models():
     await runner.complete_tool_calls(
         step="agent",
         prompt="p",
-        tools=[{"type": "function", "function": {"name": "finish_layer", "parameters": {}}}],
+        tools=[{"type": "function", "function": {"name": "finish", "parameters": {}}}],
     )
 
     assert runner.log.raw_outputs[0].raw_output["usage"] == {

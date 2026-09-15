@@ -26,7 +26,7 @@ def _wiki_input(doc: ResourceDocument) -> WikiResourceInput:
 
 
 def _card_content(index: int) -> dict:
-    return {"summary": f"Paper {index} discusses question answering.", "candidate_topics": ["question answering"]}
+    return {"title": f"Generated Paper {index}", "summary": f"Paper {index} discusses question answering.", "candidate_topics": ["question answering"]}
 
 
 def _call(name: str, **arguments: object) -> dict:
@@ -56,8 +56,8 @@ async def test_pipeline_generates_layer_content_before_next_agent_layer():
         ],
         [
             [_call("create_node", node_id="question_answering", title="Question Answering", scope="QA methods and evaluation.", card_ids=["doc_1", "doc_2", "doc_3"])],
-            [_call("finish_layer")],
-            [_call("finish_layer")],
+            [_call("finish")],
+            [_call("finish")],
         ],
     )
     client, config = FakeClient(), WikiConfig()
@@ -77,12 +77,14 @@ async def test_pipeline_generates_layer_content_before_next_agent_layer():
     assert '"scope": "QA methods and evaluation."' in fake_vlm.tool_calls[2]
     assert '"candidate_topics"' not in fake_vlm.tool_calls[2]
     assert '"card_id": "doc_3"' not in fake_vlm.tool_calls[2]
+    assignments = json.loads(client.writes["viking://wiki/source_assignments.json"])
+    assert assignments["unassigned_source_ids"] == ["question_answering"]
 
 
 @pytest.mark.asyncio
 async def test_pipeline_stops_when_agent_creates_no_directory_nodes():
     docs = [_doc(index) for index in range(1, 4)]
-    fake_vlm = FakeMixedVLM([_card_content(index) for index in range(1, 4)], [[_call("finish_layer")]])
+    fake_vlm = FakeMixedVLM([_card_content(index) for index in range(1, 4)], [[_call("finish")]])
     client, config = FakeClient(), WikiConfig()
     artifacts = await WikiPipeline(writer=_writer(client, config), config=config, llm=WikiLLMRunner(fake_vlm)).run_from_inputs(
         [_wiki_input(doc) for doc in docs], content_loader=FakeContentLoader(docs)
@@ -90,6 +92,8 @@ async def test_pipeline_stops_when_agent_creates_no_directory_nodes():
 
     assert artifacts.nodes == []
     assert artifacts.node_contexts == []
+    assignments = json.loads(client.writes["viking://wiki/source_assignments.json"])
+    assert assignments["unassigned_source_ids"] == ["doc_1", "doc_2", "doc_3"]
     assert len(fake_vlm.tool_calls) == 1
 
 
@@ -123,8 +127,8 @@ async def test_pipeline_nodes_stage_reuses_persisted_cards():
         ],
         [
             [_call("create_node", node_id="question_answering", title="Question Answering", scope="QA methods and evaluation.", card_ids=["doc_1", "doc_2", "doc_3"])],
-            [_call("finish_layer")],
-            [_call("finish_layer")],
+            [_call("finish")],
+            [_call("finish")],
         ],
     )
     config = WikiConfig()
